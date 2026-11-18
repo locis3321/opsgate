@@ -1,0 +1,572 @@
+{
+  "version": 2,
+  "note": "v1 仅收录实测通过条目（2026-10-21 逐条跑 tools/list 校准；版本用 --from/pinned == 与 @x.y.z 固化）。13 条实测通过（AC-62 ≥12 已满足）。未收录（实测不可用）：mcp-server-sqlite/weather/nmap/everything（与 mcp SDK API 不兼容）、官方 npm server-fetch/git/sqlite/time（npm 已下架）、mcp-server-kubernetes/postgres（需 kubeconfig/DB URL 启动即退）、server-puppeteer（启动后 listTools 超时）。2026-11-05 修正：mysql-mcp-server 原固定 0.1.4 在 PyPI 不存在（可用 0.1.0/0.1.2/0.2.x/0.3.x/0.4.x），且 0.3.1 缺 dotenv 依赖、0.1.2 与新版 MCP SDK 不兼容（list_resources 缺失），实际可用版本为 0.4.5，已改固定；其余 12 条固定版本经 PyPI/npm registry 复核均存在。",
+  "items": [
+    {
+      "key": "mysql-mcp-server",
+      "name": "mysql-mcp-server",
+      "displayName": "MySQL MCP Server",
+      "description": "MySQL 执行 SQL / 查表结构 / 取样行（实测 3 个工具）",
+      "repository": "https://pypi.org/project/mysql-mcp-server/",
+      "categories": [
+        "mysql"
+      ],
+      "tags": [
+        "database",
+        "sql"
+      ],
+      "runtime": "pypi",
+      "slotLabels": {
+        "MYSQL_HOST": "主机地址",
+        "MYSQL_USER": "用户名",
+        "MYSQL_PASSWORD": "密码"
+      },
+      "installations": {
+        "pypi": {
+          "command": "uvx",
+          "args": [
+            "--from",
+            "mysql-mcp-server==0.4.5",
+            "mysql_mcp_server"
+          ],
+          "env": {
+            "MYSQL_HOST": "${host}",
+            "MYSQL_PORT": "3306",
+            "MYSQL_USER": "${username}",
+            "MYSQL_PASSWORD": "${password}"
+          }
+        }
+      }
+    },
+    {
+      "key": "server-filesystem",
+      "name": "@modelcontextprotocol/server-filesystem",
+      "displayName": "Filesystem MCP Server",
+      "description": "文件读写/搜索/编辑（实测 14 个工具）",
+      "repository": "https://github.com/modelcontextprotocol/servers",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "files",
+        "local"
+      ],
+      "runtime": "npm",
+      "slotLabels": {
+        "root_dir": "允许访问的目录"
+      },
+      "installations": {
+        "npm": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-filesystem@2.0.0",
+            "${root_dir}"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "server-memory",
+      "name": "@modelcontextprotocol/server-memory",
+      "displayName": "Memory MCP Server",
+      "description": "知识图谱记忆（实测 9 个工具）",
+      "repository": "https://github.com/modelcontextprotocol/servers",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "memory",
+        "knowledge"
+      ],
+      "runtime": "npm",
+      "slotLabels": {},
+      "installations": {
+        "npm": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-memory@2.0.0"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "server-sequential-thinking",
+      "name": "@modelcontextprotocol/server-sequential-thinking",
+      "displayName": "Sequential Thinking",
+      "description": "结构化逐步推理（实测 1 个工具）",
+      "repository": "https://github.com/modelcontextprotocol/servers",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "reasoning"
+      ],
+      "runtime": "npm",
+      "slotLabels": {},
+      "installations": {
+        "npm": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-sequential-thinking@2.0.0"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "server-everything",
+      "name": "@modelcontextprotocol/server-everything",
+      "displayName": "Everything MCP Server",
+      "description": "MCP 全能力演示（实测 16 个工具）",
+      "repository": "https://github.com/modelcontextprotocol/servers",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "demo",
+        "test"
+      ],
+      "runtime": "npm",
+      "slotLabels": {},
+      "installations": {
+        "npm": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-everything@2.0.0"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "mcp-server-time",
+      "name": "mcp-server-time",
+      "displayName": "Time MCP Server",
+      "description": "当前时间与时区转换（实测 2 个工具）",
+      "repository": "https://pypi.org/project/mcp-server-time/",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "time",
+        "utility"
+      ],
+      "runtime": "pypi",
+      "slotLabels": {},
+      "installations": {
+        "pypi": {
+          "command": "uvx",
+          "args": [
+            "--from",
+            "mcp-server-time==2026.10.19",
+            "mcp-server-time"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "mcp-server-fetch",
+      "name": "mcp-server-fetch",
+      "displayName": "Fetch MCP Server",
+      "description": "抓取网页并转 Markdown（实测 1 个工具）",
+      "repository": "https://pypi.org/project/mcp-server-fetch/",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "web",
+        "fetch"
+      ],
+      "runtime": "pypi",
+      "slotLabels": {},
+      "installations": {
+        "pypi": {
+          "command": "uvx",
+          "args": [
+            "--from",
+            "mcp-server-fetch==2026.10.19",
+            "mcp-server-fetch"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "mcp-server-docker",
+      "name": "mcp-server-docker",
+      "displayName": "Docker MCP Server",
+      "description": "容器/镜像管理（实测 19 个工具）",
+      "repository": "https://pypi.org/project/mcp-server-docker/",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "containers",
+        "docker"
+      ],
+      "runtime": "pypi",
+      "slotLabels": {},
+      "installations": {
+        "pypi": {
+          "command": "uvx",
+          "args": [
+            "--from",
+            "mcp-server-docker==0.3.0",
+            "mcp-server-docker"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "prometheus-mcp",
+      "name": "prometheus-mcp",
+      "displayName": "Prometheus MCP Server",
+      "description": "指标查询/告警/目标（实测 21 个工具；默认连本地 Prometheus）",
+      "repository": "https://pypi.org/project/prometheus-mcp/",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "metrics",
+        "monitoring"
+      ],
+      "runtime": "pypi",
+      "slotLabels": {},
+      "installations": {
+        "pypi": {
+          "command": "uvx",
+          "args": [
+            "--from",
+            "prometheus-mcp==0.5.0",
+            "prometheus-mcp"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "redis-mcp-server",
+      "name": "redis-mcp-server",
+      "displayName": "Redis MCP Server",
+      "description": "Redis 命令与向量检索（实测 53 个工具；默认连本地 Redis）",
+      "repository": "https://pypi.org/project/redis-mcp-server/",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "database",
+        "cache"
+      ],
+      "runtime": "pypi",
+      "slotLabels": {},
+      "installations": {
+        "pypi": {
+          "command": "uvx",
+          "args": [
+            "--from",
+            "redis-mcp-server==0.5.1",
+            "redis-mcp-server"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "mcp-server-ssh",
+      "name": "mcp-server-ssh",
+      "displayName": "SSH MCP Server",
+      "description": "远程命令/文件/监控（实测 7 个工具；默认连本机，配置见其文档）",
+      "repository": "https://pypi.org/project/mcp-server-ssh/",
+      "categories": [
+        "host"
+      ],
+      "tags": [
+        "ssh",
+        "remote"
+      ],
+      "runtime": "pypi",
+      "slotLabels": {},
+      "installations": {
+        "pypi": {
+          "command": "uvx",
+          "args": [
+            "--from",
+            "mcp-server-ssh==2.0.0",
+            "mcp-server-ssh"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "kubernetes-mcp-server",
+      "name": "kubernetes-mcp-server",
+      "displayName": "Kubernetes MCP Server",
+      "description": "K8s 集群操作（实测 21 个工具）。通过槽位注入 kubeconfig 文件，注入为 0600 临时文件并以 --kubeconfig 传入。注意：本服务不读 NODE_TLS_REJECT_UNAUTHORIZED、也没有 --insecure-skip-tls-verify，自签证书集群需在 kubeconfig 的 cluster 段设置 insecure-skip-tls-verify: true。",
+      "repository": "https://www.npmjs.com/package/kubernetes-mcp-server",
+      "categories": [
+        "k8s"
+      ],
+      "tags": [
+        "kubernetes",
+        "k8s"
+      ],
+      "runtime": "npm",
+      "slotLabels": {
+        "KUBECONFIG": "kubeconfig 文件"
+      },
+      "installations": {
+        "npm": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "kubernetes-mcp-server@0.0.67",
+            "--kubeconfig",
+            "${KUBECONFIG}"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "playwright-mcp-server",
+      "name": "@executeautomation/playwright-mcp-server",
+      "displayName": "Playwright MCP Server",
+      "description": "浏览器自动化（实测 33 个工具；首次调用需下载浏览器）",
+      "repository": "https://www.npmjs.com/package/@executeautomation/playwright-mcp-server",
+      "categories": [
+        "other"
+      ],
+      "tags": [
+        "browser",
+        "automation"
+      ],
+      "runtime": "npm",
+      "slotLabels": {},
+      "installations": {
+        "npm": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "@executeautomation/playwright-mcp-server@1.0.12"
+          ],
+          "env": {}
+        }
+      }
+    },
+    {
+      "key": "rabbitmq-mcp-server",
+      "name": "rabbitmq-mcp",
+      "displayName": "RabbitMQ MCP Server",
+      "description": "RabbitMQ 管理 HTTP API 全量封装（实测 123 个工具）：队列/交换机/绑定/联邦/权限等。通过管理插件 HTTP API 操作，需开启 rabbitmq_management。",
+      "repository": "https://github.com/kmitchell/rabbitmq-mcp",
+      "categories": [
+        "mq"
+      ],
+      "tags": [
+        "rabbitmq",
+        "mq",
+        "amqp"
+      ],
+      "runtime": "npm",
+      "slotLabels": {
+        "RABBITMQ_HOST": "管理 API 主机（含协议，如 http://rabbit:15672）",
+        "RABBITMQ_USERNAME": "用户名",
+        "RABBITMQ_PASSWORD": "密码"
+      },
+      "installations": {
+        "npm": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "rabbitmq-mcp@0.2.0"
+          ],
+          "env": {
+            "RABBITMQ_HOST": "${RABBITMQ_HOST}",
+            "RABBITMQ_MANAGEMENT_PORT": "15672",
+            "RABBITMQ_USERNAME": "${RABBITMQ_USERNAME}",
+            "RABBITMQ_PASSWORD": "${RABBITMQ_PASSWORD}"
+          }
+        }
+      }
+    },
+    {
+      "key": "mcp-kafka",
+      "name": "mcp-kafka",
+      "displayName": "Kafka MCP Server",
+      "description": "Apache Kafka 运维（实测 8 个工具）：列主题/元数据/拉取消息/消费组 Lag/动态改配置。",
+      "repository": "https://github.com/tuannvm/kafka-mcp-server",
+      "categories": [
+        "mq"
+      ],
+      "tags": [
+        "kafka",
+        "mq",
+        "stream"
+      ],
+      "runtime": "npm",
+      "slotLabels": {
+        "KAFKA_BROKERS": "Broker 地址（逗号分隔，如 kafka:9092）"
+      },
+      "installations": {
+        "npm": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "mcp-kafka@1.2.6"
+          ],
+          "env": {
+            "KAFKA_BROKERS": "${KAFKA_BROKERS}"
+          }
+        }
+      }
+    },
+    {
+      "key": "prometheus-mcp-server",
+      "name": "prometheus-mcp-server",
+      "displayName": "Prometheus MCP Server",
+      "description": "Prometheus 指标查询（实测 5 个工具）：即时查询/区间查询/指标发现/元数据/抓取目标。",
+      "repository": "https://www.npmjs.com/package/prometheus-mcp-server",
+      "categories": [
+        "monitor"
+      ],
+      "tags": [
+        "prometheus",
+        "metrics",
+        "monitor"
+      ],
+      "runtime": "npm",
+      "slotLabels": {
+        "PROMETHEUS_URL": "Prometheus 地址（如 http://prom:9090）"
+      },
+      "installations": {
+        "npm": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "prometheus-mcp-server@1.0.1"
+          ],
+          "env": {
+            "PROMETHEUS_URL": "${PROMETHEUS_URL}"
+          }
+        }
+      }
+    },
+    {
+      "key": "baota-mcp-server",
+      "name": "bt-mcp-server",
+      "displayName": "宝塔面板 MCP Server",
+      "description": "宝塔面板运维能力（远程 HTTP MCP）。需在面板安装「宝塔 MCP 服务」插件并放行 8765、配置 IP 白名单；地址形如 https://<面板IP>:8765/bt-mcp-<实例>/mcp，令牌走 Authorization 头。",
+      "repository": "https://docs.bt.cn/ai-ops/mcp/installation",
+      "categories": [
+        "baota"
+      ],
+      "tags": [
+        "baota",
+        "bt",
+        "panel",
+        "host"
+      ],
+      "runtime": "npm",
+      "slotLabels": {
+        "BT_MCP_URL": "MCP 地址（https://<IP>:8765/bt-mcp-<实例>/mcp）",
+        "BT_MCP_TOKEN": "授权令牌"
+      },
+      "installations": {
+        "npm": {
+          "url": "${BT_MCP_URL}",
+          "headers": {
+            "Authorization": "Bearer ${BT_MCP_TOKEN}"
+          }
+        }
+      }
+    },
+    {
+      "key": "zabbix-native",
+      "name": "zabbix",
+      "displayName": "Zabbix（平台内建）",
+      "description": "平台内置 Zabbix 只读工具（查主机/事件/当前问题）。添加时填写 Zabbix 地址（带协议，如 http://zabbix.example:8080），凭证槽位填 ZABBIX_TOKEN（Zabbix 网页「用户设置 → API tokens」创建）。",
+      "repository": "https://www.zabbix.com/documentation/current/en/manual/api",
+      "categories": [
+        "zabbix"
+      ],
+      "tags": [
+        "zabbix",
+        "monitor",
+        "alert"
+      ],
+      "runtime": "npm",
+      "executionMode": "native",
+      "slotLabels": {
+        "ZABBIX_TOKEN": "Zabbix API Token（用户设置 → API tokens）"
+      },
+      "installations": {
+        "npm": {}
+      }
+    },
+    {
+      "key": "rocketmq-native",
+      "name": "rocketmq",
+      "displayName": "RocketMQ（平台内建）",
+      "description": "平台内置 RocketMQ 只读工具（集群概况/主题/消费进度）。添加时填写 RocketMQ Dashboard 地址（默认 8080），可选填 ROCKETMQ_TOKEN（内网无鉴权可留空）。",
+      "repository": "https://rocketmq.apache.org/docs/",
+      "categories": [
+        "rocketmq"
+      ],
+      "tags": [
+        "rocketmq",
+        "mq",
+        "stream"
+      ],
+      "runtime": "npm",
+      "executionMode": "native",
+      "slotLabels": {
+        "ROCKETMQ_TOKEN": "Bearer token（内网无鉴权可留空）"
+      },
+      "optionalSlots": [
+        "ROCKETMQ_TOKEN"
+      ],
+      "installations": {
+        "npm": {}
+      }
+    },
+    {
+      "key": "nacos-native",
+      "name": "nacos",
+      "displayName": "Nacos（平台内建）",
+      "description": "平台内置 Nacos 只读工具（服务/实例/配置读取/健康检查）。添加时填写 Nacos 地址（如 http://nacos.example:8848），凭证填 NACOS_TOKEN 或 NACOS_USERNAME + NACOS_PASSWORD。",
+      "repository": "https://nacos.io/docs/latest/guide/user/open-api/",
+      "categories": [
+        "nacos"
+      ],
+      "tags": [
+        "nacos",
+        "registry",
+        "config"
+      ],
+      "runtime": "npm",
+      "executionMode": "native",
+      "slotLabels": {
+        "NACOS_TOKEN": "accessToken（可选；与用户名+密码二选一）",
+        "NACOS_USERNAME": "用户名（可选）",
+        "NACOS_PASSWORD": "密码（可选）"
+      },
+      "optionalSlots": [
+        "NACOS_TOKEN",
+        "NACOS_USERNAME",
+        "NACOS_PASSWORD"
+      ],
+      "installations": {
+        "npm": {}
+      }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+# v1 独立 Compose 项目名：与机器上遗留的 v0 栈（opsgate-mcp/web/mysql/redis）隔离，
+# 避免同名项目合并/覆盖旧容器。旧栈停止/清理需单独确认。
+name: opsgate-v1
+
+services:
+  opsgate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: opsgate:v1
+    container_name: opsgate
+    env_file:
+      - .env.docker
+    ports:
+      - "8080:8080"
+    volumes:
+      # SQLite / credentials.key / 传输暂存区 / MCP 运行时凭据文件（Spec §5.2）
+      # 命名卷：与宿主机目录解耦；备份见 docs/deploy.md（docker run --volumes-from 或直接拷贝卷目录）
+      - opsgate-data:/data
+    # stdio MCP 子进程依赖容器内 /dev/shm；默认 64MB 在并发实例下可能不足
+    shm_size: "256mb"
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  opsgate-data:

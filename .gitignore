@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+coverage/
+
+# runtime data (SQLite, credentials.key, transfer staging) — 根目录 data/ 才忽略，src/data/ 是代码
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+
+# local env files (L0 config is env-based; never commit secrets)
+.env
+.env.*
+# 例外：部署模板（无真实密钥）需入库
+!.env.docker.example
+
+# 本地测试资产清单与有效 token（AGENTS.md §11 明确排除，永不入库）
+test/opencode/
+
+# local session data (never in git)
+.workbuddy/
+.e2e/
+.qoder/

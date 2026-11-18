@@ -1,0 +1,118 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1792487636578,
+      "tag": "0000_nappy_ultimates",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792487960306,
+      "tag": "0001_steady_virginia_dare",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792549712399,
+      "tag": "0002_youthful_corsair",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793687263715,
+      "tag": "0003_group_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1793866898944,
+      "tag": "0004_slot_inline_values",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1793948673561,
+      "tag": "0005_market_entries",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1793955991046,
+      "tag": "0006_adr028_credential_sharing",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1793959445069,
+      "tag": "0007_user_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794800000000,
+      "tag": "0008_market_entry_execution_mode",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794800100000,
+      "tag": "0009_market_entry_optional_slots",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794800200000,
+      "tag": "0010_market_entry_default_group",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1794800300000,
+      "tag": "0011_allow_insecure_tls",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1794800400000,
+      "tag": "0012_server_credential_multi",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1794800500000,
+      "tag": "0013_server_credential_username",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1794900600000,
+      "tag": "0014_guard_rule_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1794901200000,
+      "tag": "0015_server_credential_key",
+      "breakpoints": true
+    }
+  ]
+}
