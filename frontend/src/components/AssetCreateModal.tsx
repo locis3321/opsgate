@@ -5,6 +5,7 @@ import { api, ApiError } from '../api';
 import Modal from './Modal';
 import Tabs from './Tabs';
 import Combobox from './Combobox';
+import TagEditor from './TagEditor';
 import SlotValueEditor, { type CredCandidate } from './SlotValueEditor';
 import { detectSlots, detectPlaintextSecrets } from '../slots';
 import { StringListEditor, KVListEditor } from './ConfigEditors';
@@ -66,6 +67,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
   const [marketTool, setMarketTool] = useState('');
   const [name, setName] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [tags, setTags] = useState<string[]>([]);
   const [err, setErr] = useState('');
 
   // 原生主机（市场 tab 的内建工具）
@@ -178,7 +180,8 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
     marketTool || name.trim() || displayName.trim() || host.trim() || username.trim() || authSlot.trim()
     || command.trim() || url.trim() || argsRows.some((r) => r.trim())
     || envRows.some((r) => r.key.trim()) || headersRows.some((r) => r.key.trim())
-    || Object.keys(bindings).length > 0 || Object.values(slotValues).some((v) => v.trim()),
+    || Object.keys(bindings).length > 0 || Object.values(slotValues).some((v) => v.trim())
+    || tags.length > 0,
   );
 
   const submit = async () => {
@@ -206,6 +209,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
           credentialSlots: nativeSlots,
           credentialBindings: pickBindings(nativeSlots.map((s) => s.name)),
           inlineValues: pickInlineValues(nativeSlots.map((s) => s.name)),
+          ...(tags.length > 0 ? { tags } : {}),
         });
         onCreated(res.id);
         return;
@@ -223,6 +227,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
           credentialRefs: pickBindings(marketSlots.map((s) => s.name)),
           inlineValues: pickInlineValues(marketSlots.map((s) => s.name)),
           ...(isNativeEntry ? { url: url.trim(), ...(allowPrivate ? { allowPrivateNetwork: true } : {}), ...(allowInsecureTls ? { allowInsecureTls: true } : {}) } : {}),
+          ...(tags.length > 0 ? { tags } : {}),
         });
         onCreated(res.server.id);
         return;
@@ -246,6 +251,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
         credentialSlots: customSlots,
         credentialBindings: pickBindings(customSlots.map((s) => s.name)),
         inlineValues: pickInlineValues(customSlots.map((s) => s.name)),
+        ...(tags.length > 0 ? { tags } : {}),
       });
       onCreated(res.id);
     } catch (e) {
@@ -359,6 +365,9 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
         </Field>
         <Field label="显示名（可选）">
           <input className="input" placeholder="展示用名称" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        </Field>
+        <Field label="标签（可选）" hint="用于 MCP 端点 ?tag= 收窄与资产筛选，按精确值匹配；优先从已有标签中选">
+          <TagEditor value={tags} onChange={setTags} />
         </Field>
       </Section>
 

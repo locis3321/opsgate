@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Search, Plus, ChevronLeft, ChevronRight, Server, Upload, Power, Trash2, Globe, ShieldOff, X, RefreshCw } from 'lucide-react';
+import { Search, Plus, ChevronLeft, ChevronRight, Server, Upload, Power, Trash2, Globe, ShieldOff, X, RefreshCw, Fingerprint, AlertTriangle } from 'lucide-react';
 import { api, ApiError } from '../api';
 import AssetCreateModal from '../components/AssetCreateModal';
 import ImportMcpServersModal from '../components/ImportMcpServersModal';
 import Combobox, { type ComboOption } from '../components/Combobox';
 import StatusBadge from '../components/StatusBadge';
+import Modal from '../components/Modal';
 import { useToast } from '../components/Toast';
 
 /** 筛选下拉的"全部"项（value 为空表示不过滤） */
@@ -41,6 +42,13 @@ function VisibilityBadge({ value }: { value: string }) {
 interface Asset {
   id: string; name: string; displayName: string | null; type: string; category: string;
   executionMode: 'native' | 'mcp'; visibility: string; enabled: boolean; tags: string[];
+}
+
+/** 批量信任指纹的结果分类（服务端口径：skipped = 非目标类型，failed = 真失败） */
+interface TrustBatchResult {
+  succeeded: Array<{ id: string; name: string; fingerprint: string }>;
+  failed: Array<{ id: string; name: string; reason: string }>;
+  skipped: Array<{ id: string; name: string; reason: string }>;
 }
 interface SlotAgg { total: number; missing: number }
 
@@ -152,6 +160,27 @@ export default function Assets() {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const toggleAll = () => setSelected(allChecked ? [] : pageIds);
 
+  /** 所选资产里可信任指纹的台数（原生 host）；为 0 时禁用批量信任按钮 */
+  const trustableCount = useMemo(
+    () => items.filter((a) => selected.includes(a.id) && a.category === 'host' && a.executionMode === 'native').length,
+    [items, selected],
+  );
+  /** 批量信任结果（完成后弹窗展示失败项的主机名与 id） */
+  const [trustResult, setTrustResult] = useState<TrustBatchResult | null>(null);
+  const trustBatch = useMutation({
+    mutationFn: () =>
+      api<TrustBatchResult>('/api/v1/servers/ssh/trust-fingerprint-batch', {
+        method: 'POST',
+        body: JSON.stringify({ ids: selected }),
+      }),
+    onSuccess: (d) => {
+      setTrustResult(d);
+      setSelected([]);
+      void qc.invalidateQueries({ queryKey: ['assets'] });
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : '批量信任失败'),
+  });
+
   return (
     <div className="page animate-slide-up">
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16 }}>
@@ -242,6 +271,15 @@ export default function Assets() {
           </button>
           <button className="btn" style={{ gap: 5, minHeight: 30 }} onClick={() => batch.mutate({ action: 'deny-private-network' })} disabled={batch.isPending}>
             <ShieldOff size={13} strokeWidth={2} /> 禁止私网访问
+          </button>
+          <button
+            className="btn"
+            style={{ gap: 5, minHeight: 30 }}
+            onClick={() => trustBatch.mutate()}
+            disabled={batch.isPending || trustBatch.isPending || trustableCount === 0}
+            title={trustableCount === 0 ? '所选资产里没有可信任指纹的原生主机' : `对所选 ${trustableCount} 台原生主机采集并信任 SSH 指纹`}
+          >
+            <Fingerprint size={13} strokeWidth={2} /> {trustBatch.isPending ? '信任中…' : `信任指纹${trustableCount > 0 ? `（${trustableCount}）` : ''}`}
           </button>
           <button className="btn btn-danger" style={{ gap: 5, minHeight: 30 }} onClick={() => setConfirmBatchDelete(true)} disabled={batch.isPending}>
             <Trash2 size={13} strokeWidth={2} /> 删除
@@ -357,6 +395,66 @@ export default function Assets() {
           onClose={() => setShowImport(false)}
           onImported={() => { void q.refetch(); }}
         />
+      )}
+
+      {trustResult && (
+        <Modal title="批量信任主机指纹 · 结果" onClose={() => setTrustResult(null)} width={720}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <StatusBadge kind="success" label={`成功 ${trustResult.succeeded.length}`} />
+            <StatusBadge kind="error" label={`失败 ${trustResult.failed.length}`} />
+            <StatusBadge kind="warn" label={`跳过 ${trustResult.skipped.length}`} />
+          </div>
+
+          {trustResult.succeeded.length > 0 && (
+            <div style={{ display: 'grid', gap: 4 }}>
+              <div style={{ color: 'var(--fg-2)', fontSize: 'var(--text-sm)', fontWeight: 600 }}>已信任</div>
+              {trustResult.succeeded.map((s) => (
+                <div key={s.id} className="mono" style={{ fontSize: 12, color: 'var(--muted)' }}>
+                  {s.name} <span style={{ color: 'var(--accent)' }}>{s.fingerprint.slice(0, 24)}…</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {trustResult.failed.length > 0 && (
+            <div style={{ display: 'grid', gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--danger)', fontSize: 'var(--text-sm)', fontWeight: 600 }}>
+                <AlertTriangle size={14} strokeWidth={2} /> 失败（{trustResult.failed.length}）
+              </div>
+              <div style={{
+                display: 'grid', gap: 6, maxHeight: 240, overflowY: 'auto', padding: '8px 10px',
+                border: '1px solid var(--danger)', borderRadius: 'var(--r-md)', background: 'var(--danger-soft)',
+              }}>
+                {trustResult.failed.map((f) => (
+                  <div key={f.id} style={{ display: 'grid', gap: 1 }}>
+                    <span className="mono" style={{ fontSize: 13, fontWeight: 550 }}>{f.name}</span>
+                    <span className="mono" style={{ fontSize: 11, color: 'var(--muted)' }}>{f.id}</span>
+                    <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>{f.reason}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {trustResult.skipped.length > 0 && (
+            <div style={{ display: 'grid', gap: 4 }}>
+              <div style={{ color: 'var(--warn)', fontSize: 'var(--text-sm)', fontWeight: 600 }}>跳过（{trustResult.skipped.length}）</div>
+              <div style={{ maxHeight: 180, overflowY: 'auto', display: 'grid', gap: 3 }}>
+                {trustResult.skipped.map((s) => (
+                  <div key={s.id} style={{ fontSize: 12, color: 'var(--muted)' }}>
+                    <span className="mono" style={{ color: 'var(--fg-2)' }}>{s.name}</span>
+                    <span className="mono" style={{ marginLeft: 8, opacity: 0.7 }}>{s.id}</span>
+                    <div style={{ color: 'var(--meta)' }}>{s.reason}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button className="btn btn-primary" onClick={() => setTrustResult(null)}>关闭</button>
+          </div>
+        </Modal>
       )}
     </div>
   );

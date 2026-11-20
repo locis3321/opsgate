@@ -68,26 +68,46 @@ describe('目录数据（AC-62）', () => {
   it('目录条目数（AC-62：≥12）——2026-10-21 实测批次 13 条', () => {
     expect(loadCatalog().length).toBeGreaterThanOrEqual(12);
   });
+  it('内置目录 = 管理员整理后的 16 条（2026-11-19 固化，防止已删条目被重新种回）', () => {
+    // 背景：管理员在管理端删掉 7 条（fetch/time/playwright/everything/filesystem/memory/
+    // sequential-thinking）并新增 3 条（elasticsearch/minio×2）。种子文件若不同步，
+    // 新环境首启会把删掉的重新种进去。此用例把这份人工决策固化为回归门禁。
+    expect(loadCatalog().map((e) => e.key).sort()).toEqual([
+      'baota-mcp-server',
+      'kubernetes-mcp-server',
+      'mcp-kafka',
+      'mcp-server-docker',
+      'mcp-server-elasticsearch',
+      'mcp-server-ssh',
+      'minio-mcp-server',
+      'mysql-mcp-server',
+      'nacos-native',
+      'pickstar-2002-minio-mcp',
+      'prometheus-mcp',
+      'prometheus-mcp-server',
+      'rabbitmq-mcp-server',
+      'redis-mcp-server',
+      'rocketmq-native',
+      'zabbix-native',
+    ]);
+  });
   it('固定版本必须是已核验存在的版本（2026-11-05 复核 PyPI/npm registry）', () => {
     // 回归：mysql-mcp-server 曾固定为 PyPI 不存在的 0.1.4 → uvx 解析失败 → 实例拉起即退，
     // 连通性测试只报无用的 "Connection closed"。此处锁定经 registry 复核存在的版本组合。
     const VERIFIED: Record<string, string> = {
       'mysql-mcp-server': 'mysql-mcp-server==0.4.5',
-      'mcp-server-time': 'mcp-server-time==2026.10.19',
-      'mcp-server-fetch': 'mcp-server-fetch==2026.10.19',
       'mcp-server-docker': 'mcp-server-docker==0.3.0',
       'prometheus-mcp': 'prometheus-mcp==0.5.0',
       'redis-mcp-server': 'redis-mcp-server==0.5.1',
       'mcp-server-ssh': 'mcp-server-ssh==2.0.0',
-      'server-filesystem': '@modelcontextprotocol/server-filesystem@2.0.0',
-      'server-memory': '@modelcontextprotocol/server-memory@2.0.0',
-      'server-sequential-thinking': '@modelcontextprotocol/server-sequential-thinking@2.0.0',
-      'server-everything': '@modelcontextprotocol/server-everything@2.0.0',
       'kubernetes-mcp-server': 'kubernetes-mcp-server@0.0.67',
-      'playwright-mcp-server': '@executeautomation/playwright-mcp-server@1.0.12',
       'rabbitmq-mcp-server': 'rabbitmq-mcp@0.2.0',
       'mcp-kafka': 'mcp-kafka@1.2.6',
       'prometheus-mcp-server': 'prometheus-mcp-server@1.0.1',
+      // 2026-11-19 新增（原为未固定版本，违反 AC-62；版本已 npm registry 复核）
+      'mcp-server-elasticsearch': '@elastic/mcp-server-elasticsearch@0.3.1',
+      'minio-mcp-server': 'minio-mcp-server@0.1.0',
+      'pickstar-2002-minio-mcp': '@pickstar-2002/minio-mcp@1.1.2',
     };
     for (const e of loadCatalog()) {
       const inst = e.installations[e.runtime]!;

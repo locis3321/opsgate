@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { api, ApiError, fmtTs } from '../api';
 import Modal from '../components/Modal';
+import Combobox, { type ComboOption } from '../components/Combobox';
 
 interface GroupDetail {
   id: string;
@@ -25,7 +26,7 @@ interface GroupDetail {
 }
 
 interface ServerItem {
-  id: string; name: string; displayName: string | null; category: string;
+  id: string; name: string; displayName: string | null; category: string; tags?: string[];
 }
 interface UserItem { id: string; username: string; name: string | null; isAdmin: boolean }
 
@@ -417,21 +418,36 @@ function KvModal({
   );
 }
 
+const CAT_ALL: ComboOption = { value: '', label: '全部品类' };
+const TAG_ALL: ComboOption = { value: '', label: '全部标签' };
+const CATEGORY_LABEL: Record<string, string> = {
+  host: '主机', mysql: 'MySQL', k8s: 'K8s', other: '其他', zabbix: 'Zabbix', rocketmq: 'RocketMQ',
+  nacos: 'Nacos', mq: '消息队列', baota: '宝塔面板', monitor: '监控', elasticsearch: 'Elasticsearch',
+};
+
+/**
+ * 添加关联资产：搜索 + 品类/标签筛选 + 「全选匹配」。
+ * 分组详情页是最常按品类/标签批量归组的地方（例："把所有 host 加进主机组"），
+ * 只有搜索的话得逐个勾选上百台。
+ * 筛选变化**不清空已选**：允许"按品类选一批、再按标签补一批"的叠加选择。
+ */
 function AssetPickerModal({
   groupId, bound, onClose, onSaved,
 }: {
   groupId: string; bound: string[]; onClose: () => void; onSaved: () => void;
 }) {
   const [search, setSearch] = useState('');
+  const [cat, setCat] = useState('');
+  const [tag, setTag] = useState('');
   const [picked, setPicked] = useState<string[]>([]);
   const [err, setErr] = useState('');
   const q = useQuery({
-    queryKey: ['group-picker-assets', search],
+    queryKey: ['group-picker-assets'],
     queryFn: async () => {
       const out: ServerItem[] = [];
       let page = 1;
       for (;;) {
-        const r = await api<{ items: ServerItem[]; total: number }>(`/api/v1/servers?page=${page}&search=${encodeURIComponent(search)}`);
+        const r = await api<{ items: ServerItem[]; total: number }>(`/api/v1/servers?page=${page}&pageSize=500`);
         out.push(...r.items);
         if (out.length >= r.total || r.items.length === 0) break;
         page += 1;
@@ -446,24 +462,82 @@ function AssetPickerModal({
     onSuccess: onSaved,
     onError: (e) => setErr(e instanceof ApiError ? e.message : '添加失败'),
   });
-  const available = (q.data ?? []).filter((s) => !bound.includes(s.id));
+
+  /** 已在组内的资产不参与选取（不是"隐藏"，只是不可勾） */
+  const boundSet = useMemo(() => new Set(bound), [bound]);
+  const selectable = useMemo(
+    () => (q.data ?? []).filter((s) => !boundSet.has(s.id)),
+    [q.data, boundSet],
+  );
+  const categories = useMemo(() => [...new Set(selectable.map((s) => s.category))].sort(), [selectable]);
+  const tags = useMemo(() => [...new Set(selectable.flatMap((s) => s.tags ?? []))].sort(), [selectable]);
+
+  const kw = search.trim().toLowerCase();
+  const matched = useMemo(() => selectable.filter((s) =>
+    (!cat || s.category === cat) &&
+    (!tag || (s.tags ?? []).includes(tag)) &&
+    (!kw || s.name.toLowerCase().includes(kw) || (s.displayName ?? '').toLowerCase().includes(kw)),
+  ), [selectable, cat, tag, kw]);
+
+  const matchedIds = useMemo(() => matched.map((s) => s.id), [matched]);
+  const allMatchedPicked = matchedIds.length > 0 && matchedIds.every((id) => picked.includes(id));
 
   return (
-    <Modal title="添加关联资产" onClose={onClose} width={620}>
-      <div style={{ position: 'relative' }}>
-        <Search size={14} style={{ position: 'absolute', left: 10, top: 11, color: 'var(--meta)' }} strokeWidth={1.8} />
-        <input className="input" placeholder="搜索资产名…" style={{ paddingLeft: 30 }} value={search}
-          onChange={(e) => setSearch(e.target.value)} />
+    <Modal title="添加关联资产" onClose={onClose} width={720}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span className="tag">已选 {picked.length} / 匹配 {matched.length}</span>
+        <button
+          type="button"
+          className="btn"
+          style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)', padding: '2px 8px' }}
+          disabled={matchedIds.length === 0}
+          onClick={() => {
+            if (allMatchedPicked) setPicked((prev) => prev.filter((id) => !matchedIds.includes(id)));
+            else setPicked((prev) => [...new Set([...prev, ...matchedIds])]);
+          }}
+        >
+          {allMatchedPicked ? '取消全选匹配' : '全选匹配'}
+        </button>
+        {picked.length > 0 && (
+          <button type="button" className="btn" style={{ fontSize: 'var(--text-xs)', padding: '2px 8px' }} onClick={() => setPicked([])}>
+            清空已选
+          </button>
+        )}
       </div>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ position: 'relative', flex: 1, minWidth: 160 }}>
+          <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--meta)' }} strokeWidth={1.8} />
+          <input className="input" placeholder="搜索资产名…" style={{ paddingLeft: 30 }} value={search}
+            onChange={(e) => setSearch(e.target.value)} />
+        </div>
+        <div style={{ minWidth: 128 }}><Combobox
+          ariaLabel="品类筛选"
+          value={cat}
+          onChange={setCat}
+          placeholder="全部品类"
+          options={[CAT_ALL, ...categories.map((c) => ({ value: c, label: CATEGORY_LABEL[c] ?? c }))]}
+        /></div>
+        <div style={{ minWidth: 128 }}><Combobox
+          ariaLabel="标签筛选"
+          value={tag}
+          onChange={setTag}
+          placeholder="全部标签"
+          options={[TAG_ALL, ...tags.map((t) => ({ value: t, label: t }))]}
+        /></div>
+      </div>
+
       <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
         {q.isLoading ? (
           <div style={{ padding: 24, textAlign: 'center', color: 'var(--muted)' }}>
             <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
           </div>
-        ) : available.length === 0 ? (
-          <div style={{ padding: 24, textAlign: 'center', color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>没有可添加的资产</div>
+        ) : matched.length === 0 ? (
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>
+            {selectable.length === 0 ? '没有可添加的资产（已全部在组内）' : '没有匹配的资产'}
+          </div>
         ) : (
-          available.map((s) => (
+          matched.map((s) => (
             <label key={s.id} style={{
               display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px',
               borderBottom: '1px solid var(--border-soft)', cursor: 'pointer',
@@ -478,7 +552,8 @@ function AssetPickerModal({
                   <span style={{ fontSize: 12, color: 'var(--meta)', wordBreak: 'break-all' }}>{s.displayName}</span>
                 )}
               </span>
-              <span className="tag">{s.category}</span>
+              {(s.tags ?? []).map((t) => <span key={t} className="tag">{t}</span>)}
+              <span className="tag">{CATEGORY_LABEL[s.category] ?? s.category}</span>
             </label>
           ))
         )}

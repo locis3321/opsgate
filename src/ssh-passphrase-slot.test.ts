@@ -1,7 +1,7 @@
 /**
  * SSH 私钥口令槽位（authPassSlot）解析 + 认证参数装配。
  *
- * 锁定两个真实缺陷（2026-11-18 用户报 host-a 连通性测试失败）：
+ * 锁定两个真实缺陷（2026-11-18 用户报 tke-host-16.251 连通性测试失败）：
  *  1. 资产声明 authPassSlot=AUTH_PASS 且该槽位绑定 ssh_key 凭证时，
  *     resolveSlotValues 按槽位名找键（AUTH_PASS → 归一化 pass），而凭证键是 passphrase
  *     → 抛「缺少槽位键 "AUTH_PASS"（fail-closed）」，口令根本到不了 ssh2。

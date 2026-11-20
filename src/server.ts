@@ -3,7 +3,7 @@
  * 启动序列：bootstrap(L0) → 数据目录 → SQLite(WAL/FK) → 迁移 → 审计当月表 → settings 启动校验
  * → better-auth（首启建管理员）→ buildApp（default-deny 注册表 + 根级 preHandler）→ listen。
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +15,8 @@ import { Settings } from './config/settings.js';
 import * as schema from './db/schema.js';
 import { ensureAuditTable } from './db/audit.js';
 import { createSettingsStorage } from './db/settings-store.js';
-import { marketEntries } from './db/schema.js';
+import { guardRules, marketEntries } from './db/schema.js';
+import { BUILTIN_GUARD_RULES } from './db/builtinGuardRules.js';
 import { entryToRow } from './db/marketEntries.js';
 import { loadCatalog } from './services/marketCatalog.js';
 import { createAuth, createUserWithPassword, ensureAuthTables } from './services/auth.js';
@@ -77,6 +78,23 @@ async function main(): Promise<void> {
       if (res.changes > 0) seeded++;
     }
     console.log(`[bootstrap] 已导入内置 Market 目录 ${seeded} 条（首启）`);
+  }
+
+  // 首启 seed 内置安全策略（§4.7）：生产部署不会跑 `pnpm run seed`，此前只靠手工执行，
+  // 导致部署机 guard_rules 长期为 0 行、页面显示「暂无安全策略」。
+  //
+  // 用数据目录下的一次性标记判断"是否已播种过"，而不是"表是否为空"：
+  // 管理员有权删除内置规则（已验证的能力），删光后重启不能把它们又加回来。
+  // 标记是运行时状态（不属于配置），不放 system_settings（ADR-024 只存偏离默认值的配置项）。
+  const guardSeedMarker = path.join(cfg.dataDir, '.guard-rules-seeded');
+  if (!existsSync(guardSeedMarker)) {
+    let seeded = 0;
+    for (const r of BUILTIN_GUARD_RULES) {
+      const res = db.insert(guardRules).values({ ...r, enabled: true, locked: true, builtin: true, hitCount: 0 }).onConflictDoNothing({ target: guardRules.id }).run();
+      if (res.changes > 0) seeded++;
+    }
+    writeFileSync(guardSeedMarker, new Date().toISOString());
+    console.log(`[bootstrap] 已导入内置安全策略 ${seeded} 条（首启，此后不再自动补种）`);
   }
 
   // L1 settings 启动期校验（AC-59：孤儿告警 / 非法值启动失败）

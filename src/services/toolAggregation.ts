@@ -515,7 +515,7 @@ async function derivedToolsOf(
  * 工具名唯一性判定（ADR-032 · P1）。
  *
  * 为什么需要单独一个函数：原生工具是先 `tools.push()` 插进去、派生工具走 `seenByName` 去重，
- * 两条路径互不相识。`host-b` 的 mcp-server-ssh 派生出 `execute_command`，
+ * 两条路径互不相识。`office-host-3.58-test` 的 mcp-server-ssh 派生出 `execute_command`，
  * 与原生 `host.execute_command` 映射后同名，于是同一个视图里出现两个 `host_execute_command`。
  * MCP 要求工具名唯一（客户端按名路由，重名行为未定义）。
  *

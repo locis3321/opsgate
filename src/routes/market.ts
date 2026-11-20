@@ -23,6 +23,7 @@ import {
 } from '../services/marketCatalog.js';
 import { categoryCounts, getEntry, listEntries, type MarketStatus } from '../db/marketEntries.js';
 import { getReadme, type FetchImpl } from '../services/readmeFetcher.js';
+import { normalizeTags } from '../services/assetTags.js';
 import { governanceAudit } from './assets.js';
 import type { RouteDefinition } from './registry.js';
 
@@ -166,6 +167,11 @@ export function makeMarketRoutes(deps: MarketDeps & { catalogEntries?: CatalogEn
           allowPrivateNetwork?: boolean;
           /** 允许不安全 TLS（自签证书集群/面板）；默认 false */
           allowInsecureTls?: boolean;
+          /**
+           * 组织标签（可选）。**不**从目录条目的 tags 继承：那是社区 registry 元数据（如 database,sql），
+           * 混进组织标签会污染 `?tag=` 收窄与分组筛选。
+           */
+          tags?: unknown;
         };
         if (!body.pkgName || !body.name) {
           return reply.code(400).send({ code: 400, data: null, message: 'pkgName/name 必填' });
@@ -177,6 +183,10 @@ export function makeMarketRoutes(deps: MarketDeps & { catalogEntries?: CatalogEn
         if (!entry) return reply.code(404).send({ code: 404, data: null, message: '目录条目不存在' });
         const dup = await db.select({ id: schema.servers.id }).from(schema.servers).where(eq(schema.servers.name, body.name)).get();
         if (dup) return reply.code(400).send({ code: 400, data: null, message: `资产名 "${body.name}" 已存在` });
+
+        // 标签归一与 PATCH/POST 同口径（去空白/去重/限长限数）；不继承目录条目的 tags
+        const tagsNorm = normalizeTags(body.tags ?? []);
+        if ('error' in tagsNorm) return reply.code(400).send({ code: 400, data: null, message: tagsNorm.error });
 
         const isNativeEntry = entry.executionMode === 'native';
         // 原生条目：无配置可展开，地址由用户填写（该品类产品的管理 API 地址随部署而变，不能写死在目录里）
@@ -291,6 +301,7 @@ export function makeMarketRoutes(deps: MarketDeps & { catalogEntries?: CatalogEn
               ...(isNativeEntry && body.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : {}),
               ...(body.allowInsecureTls === true ? { allowInsecureTls: true } : {}),
               credentialSlots: credentialSlots as never[],
+              tags: tagsNorm.tags,
               ownerId: p.userId,
               visibility: 'owner',
               sharedWithUserIds: [],

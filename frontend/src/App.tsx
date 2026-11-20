@@ -217,6 +217,16 @@ function SessionGuard({ children }: { children: ReactNode }) {
         <div className="sidebar-brand">
           <div className="sidebar-logo">O</div>
           {!collapsed && <span className="sidebar-brand-text">OpsGate</span>}
+          {/* 折叠开关跟随品牌行（用户要求：放在 OpsGate 右侧、居右） */}
+          <button
+            className="icon-btn"
+            style={{ marginLeft: 'auto' }}
+            onClick={() => setCollapsed((v) => !v)}
+            title={collapsed ? '展开侧栏' : '收起侧栏'}
+            aria-label={collapsed ? '展开侧栏' : '收起侧栏'}
+          >
+            {collapsed ? <PanelLeftOpen size={15} strokeWidth={1.8} /> : <PanelLeftClose size={15} strokeWidth={1.8} />}
+          </button>
         </div>
 
         <nav className="sidebar-nav">
@@ -238,33 +248,6 @@ function SessionGuard({ children }: { children: ReactNode }) {
               </div>
             )}
           </div>
-          {collapsed ? (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-              <button className="icon-btn" onClick={() => setCollapsed(false)} title="展开侧栏" aria-label="展开侧栏">
-                <PanelLeftOpen size={15} strokeWidth={1.8} />
-              </button>
-              <ThemeToggle />
-              <button className="icon-btn" onClick={() => setPwdOpen(true)} title="修改密码" aria-label="修改密码">
-                <KeyRound size={15} strokeWidth={1.8} />
-              </button>
-              <button className="icon-btn" onClick={signOut} title="退出登录" aria-label="退出登录">
-                <LogOut size={15} strokeWidth={1.8} />
-              </button>
-            </div>
-          ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 32px)', gap: 4, justifyContent: 'start' }}>
-              <ThemeToggle />
-              <button className="icon-btn" onClick={() => setPwdOpen(true)} title="修改密码" aria-label="修改密码">
-                <KeyRound size={15} strokeWidth={1.8} />
-              </button>
-              <button className="icon-btn" onClick={signOut} title="退出登录" aria-label="退出登录">
-                <LogOut size={15} strokeWidth={1.8} />
-              </button>
-              <button className="icon-btn" onClick={() => setCollapsed(true)} title="收起侧栏" aria-label="收起侧栏">
-                <PanelLeftClose size={15} strokeWidth={1.8} />
-              </button>
-            </div>
-          )}
         </div>
       </aside>
 
@@ -293,6 +276,15 @@ function SessionGuard({ children }: { children: ReactNode }) {
               <span className="dot" />{env.text}
             </span>
             <NotificationBell />
+            {/* 主题 / 改密 / 退出从侧栏挪到顶栏（用户要求），与搜索、环境标识同排 */}
+            <span style={{ width: 1, height: 20, background: 'var(--border)' }} aria-hidden />
+            <ThemeToggle />
+            <button className="icon-btn" onClick={() => setPwdOpen(true)} title="修改密码" aria-label="修改密码">
+              <KeyRound size={15} strokeWidth={1.8} />
+            </button>
+            <button className="icon-btn" onClick={signOut} title="退出登录" aria-label="退出登录">
+              <LogOut size={15} strokeWidth={1.8} />
+            </button>
           </div>
         </header>
         <main className="main-content animate-fade-in">

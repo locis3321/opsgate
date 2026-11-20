@@ -206,6 +206,23 @@ h3 { font-size: var(--text-base); }
 .page-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .page-title { font-size: var(--text-xl); font-weight: 650; }
 .toolbar { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+
+/**
+ * 页头工具栏（标题在左、操作组在右）。
+ * 宽屏：操作组一行靠右；窄屏：操作组整体换到下一行并铺满，
+ * 而不是把它压扁成换行的碎块（换行会让"刷新/管理目录"落到不同行，视觉上很乱）。
+ */
+.page-toolbar { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.page-toolbar > .page-toolbar-main { flex: 1 1 auto; min-width: 0; }
+.page-toolbar > .page-toolbar-actions {
+  display: flex; align-items: center; gap: var(--space-2);
+  flex-shrink: 0; margin-left: auto; flex-wrap: nowrap;
+}
+@media (max-width: 1100px) {
+  .page-toolbar > .page-toolbar-actions {
+    flex: 1 1 100%; margin-left: 0; justify-content: flex-start; flex-wrap: wrap;
+  }
+}
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-4); }
 .loading { color: var(--muted); padding: var(--space-5) 0; }
 

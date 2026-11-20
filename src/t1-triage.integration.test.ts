@@ -146,8 +146,29 @@ describe('T1-1 直填值按归属掩码', () => {  it('owner 得明文，成员�
   });
 });
 
-describe('T1-2 解绑按 credentialId 精确匹配', () => {
-  it('同槽绑两条 → 用某条自己的 credentialId 解绑只删那一条', async () => {
+describe('T1-2b 槽位列表的主凭证 = 运行时实际取值（ADR-034）', () => {
+  it('两条同为 root 级时，primary 指向管理账号而非第一条', async () => {
+    // 业务账号名在前、root 账号名在后，模拟迁移后 v1 数据的真实形态
+    const biz = await api('POST', '/api/v1/credentials', memberCookie, { name: 'zz-biz-account', values: { AUTH: 'biz' }, privileges: ['root'] });
+    const root = await api('POST', '/api/v1/credentials', memberCookie, { name: 'zz-root-account', values: { AUTH: 'root' }, privileges: ['root'] });
+    const bizId = (biz.json.data as { id: string }).id;
+    const rootId = (root.json.data as { id: string }).id;
+    expect((await api('POST', `/api/v1/servers/${assetId}/slots`, memberCookie, { slotName: 'AUTH', credentialId: bizId })).status).toBe(200);
+    expect((await api('POST', `/api/v1/servers/${assetId}/slots`, memberCookie, { slotName: 'AUTH', credentialId: rootId })).status).toBe(200);
+
+    const view = (await api('GET', `/api/v1/servers/${assetId}/slots`, memberCookie)).json.data as Array<{
+      slotName: string; credentialId: string | null; credentialName: string | null;
+    }>;
+    const auth = view.find((s) => s.slotName === 'AUTH')!;
+    expect(auth.credentialName).toBe('zz-root-account');
+    expect(auth.credentialId).toBe(rootId);
+
+    await api('DELETE', `/api/v1/servers/${assetId}/slots/AUTH?credentialId=${bizId}`, memberCookie);
+    await api('DELETE', `/api/v1/servers/${assetId}/slots/AUTH?credentialId=${rootId}`, memberCookie);
+  });
+});
+
+describe('T1-2 解绑按 credentialId 精确匹配', () => {  it('同槽绑两条 → 用某条自己的 credentialId 解绑只删那一条', async () => {
     const c1 = await api('POST', '/api/v1/credentials', memberCookie, { name: 't1-cred-1', values: { AUTH: 'a' } });
     const c2 = await api('POST', '/api/v1/credentials', memberCookie, { name: 't1-cred-2', values: { AUTH: 'b' } });
     const cid1 = (c1.json.data as { id: string }).id;

@@ -11,6 +11,7 @@ import StatusBadge from '../components/StatusBadge';
 import Tabs from '../components/Tabs';
 import { useToast } from '../components/Toast';
 import Combobox from '../components/Combobox';
+import TagEditor from '../components/TagEditor';
 
 interface SlotRow { slotName: string; label: string; target: string; file: boolean; optional?: boolean; credentialId: string | null; credentialName: string | null; inlineValue: string | null; hasInline?: boolean }
 interface ToolRow { name: string; description: string }
@@ -186,6 +187,21 @@ export default function AssetDetail() {
       setAllowPrivateDraft(null);
       toast.error(e instanceof ApiError ? e.message : '保存失败');
     },
+  });
+
+  /**
+   * 标签保存（整体替换）。标签影响 `?tag=` 收窄与分组筛选，所以每次增删都立刻落库，
+   * 不做"批量编辑后统一保存"——否则用户以为改完了、实际没生效。
+   */
+  const patchTags = useMutation({
+    mutationFn: (tags: string[]) =>
+      api(`/api/v1/servers/${id}`, { method: 'PATCH', body: JSON.stringify({ tags }) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['asset', id] });
+      void qc.invalidateQueries({ queryKey: ['assets'] });
+      void qc.invalidateQueries({ queryKey: ['server-tags'] });
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : '标签保存失败'),
   });
 
   const a = asset.data;
@@ -398,7 +414,17 @@ export default function AssetDetail() {
             <Row k="协议" v={String(a.type)} mono />
             <Row k="品类" v={String(a.category)} />
             <Row k="执行模式" v={String(a.executionMode)} />
-            <Row k="标签" v={(a.tags as string[] ?? []).join(', ') || '无'} />
+            <div style={{ display: 'grid', gap: 6, borderTop: '1px solid var(--border-soft)', paddingTop: 10 }}>
+              <div style={{ color: 'var(--meta)', fontSize: 'var(--text-sm)' }}>标签</div>
+              <TagEditor
+                inputId="asset-tags-input"
+                value={(a.tags as string[] | null) ?? []}
+                onChange={(tags) => patchTags.mutate(tags)}
+              />
+              <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)' }}>
+                标签用于 MCP 端点 <span className="mono">?tag=</span> 收窄与资产筛选，按精确值匹配；优先从已有标签中选，避免近义重复。
+              </div>
+            </div>
             <Row k="主机" v={a.hostConn ? `${(a.hostConn as Record<string, unknown>).host}:${(a.hostConn as Record<string, unknown>).port ?? 22}` : '无'} />
             <Row k="配置哈希" v={String(a.configHash).slice(0, 12)} mono />
             <Row k="创建" v={fmtTs(a.createdAt as number)} />

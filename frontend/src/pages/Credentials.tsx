@@ -1,10 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Plus, KeyRound, Trash2, Eye, EyeOff, RefreshCw } from 'lucide-react';
+import { Plus, KeyRound, Trash2, Eye, EyeOff, RefreshCw, Search, ChevronLeft, ChevronRight } from 'lucide-react';
 import { api, ApiError, fmtTs } from '../api';
 import Modal from '../components/Modal';
 import Combobox from '../components/Combobox';
+
+/** 列表每页条数（用户要求 20） */
+const PAGE_SIZE = 20;
 
 interface Cred {
   id: string; name: string; kind: string; valueHint: string; ownerId: string; ownerName?: string; createdAt: number | null;
@@ -65,6 +68,9 @@ export default function Credentials() {
   const CRED_TYPES = typesQ.data && typesQ.data.length > 0 ? typesQ.data : FALLBACK_TYPES;
   const KIND_LABELS = new Map(CRED_TYPES.map((t) => [t.kind, t.label] as const));
   const qc = useQueryClient();
+  const [page, setPage] = useState(1);
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [kind, setKind] = useState('user_password');
@@ -80,6 +86,28 @@ export default function Credentials() {
     mutationFn: (id: string) => api(`/api/v1/credentials/${id}`, { method: 'DELETE' }),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['credentials'] }); setConfirming(null); },
   });
+
+  // 搜索防抖 300ms：输入只更新 searchInput，稳定后才过滤（与资产页同节奏）
+  useEffect(() => {
+    const t = window.setTimeout(() => { setSearch(searchInput); setPage(1); }, 300);
+    return () => window.clearTimeout(t);
+  }, [searchInput]);
+
+  const all = q.data ?? [];
+  const filtered = useMemo(() => {
+    const kw = search.trim().toLowerCase();
+    if (!kw) return all;
+    return all.filter((c) =>
+      c.name.toLowerCase().includes(kw) ||
+      (c.ownerName ?? c.ownerId).toLowerCase().includes(kw) ||
+      c.kind.toLowerCase().includes(kw),
+    );
+  }, [all, search]);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const curPage = Math.min(page, totalPages);
+  const pageRows = filtered.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
+  // 删除后当前页可能越界：跟随总数收敛，避免停留在空白页
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   const cur = CRED_TYPES.find((t) => t.kind === kind)!;
   const create = useMutation({
@@ -115,8 +143,20 @@ export default function Credentials() {
   return (
     <div className="page animate-slide-up">
       <div>
-        <div className="page-header">
-          <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 650 }}>凭证</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 650, flexShrink: 0 }}>凭证</h1>
+          <span style={{ flex: 1 }} />
+          <div style={{ position: 'relative', flex: '0 1 280px', minWidth: 160 }}>
+            <Search size={15} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--meta)', pointerEvents: 'none' }} strokeWidth={1.8} />
+            <input
+              className="input"
+              style={{ paddingLeft: 34 }}
+              placeholder="搜索名称 / 归属人 / 类型"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              aria-label="搜索凭证"
+            />
+          </div>
           <button className="btn" onClick={() => { void q.refetch(); }} disabled={q.isFetching} title="重新拉取凭证列表">
             <RefreshCw size={14} strokeWidth={1.8} className={q.isFetching ? 'spin' : ''} /> 刷新
           </button>
@@ -246,18 +286,24 @@ export default function Credentials() {
           </div>
           <span style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>加载中…</span>
         </div>
-      ) : q.data && q.data.length === 0 ? (
+      ) : all.length === 0 ? (
         <div className="empty">
           <KeyRound size={32} style={{ color: 'var(--meta)', marginBottom: 8 }} strokeWidth={1.5} />
           <div>暂无凭证</div>
           <div className="hint">点击"新建凭证"创建；创建后可在详情页按分组共享</div>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="empty">
+          <Search size={32} style={{ color: 'var(--meta)', marginBottom: 8 }} strokeWidth={1.5} />
+          <div>无匹配凭证</div>
+          <div className="hint">没有名称 / 归属人 / 类型匹配「{search}」的凭证</div>
         </div>
       ) : (
       <div className="card" style={{ overflow: 'auto' }}>
         <table className="dt">
           <thead><tr><th>名称</th><th>类型</th><th>等级</th><th>值提示</th><th>被引用数</th><th>实际使用者</th><th>创建时间</th><th>归属</th><th>操作</th></tr></thead>
           <tbody>
-            {(q.data ?? []).map((c) => (
+            {pageRows.map((c) => (
               <tr key={c.id}>
                 <td className="mono" style={{ cursor: 'pointer' }} onClick={() => nav(`/credentials/${c.id}`)}>{c.name}</td>
                 <td>{KIND_LABELS.get(c.kind) ?? c.kind}</td>
@@ -285,6 +331,20 @@ export default function Credentials() {
           </tbody>
         </table>
       </div>
+      )}
+
+      {filtered.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center', color: 'var(--muted)' }}>
+          <button className="btn" disabled={curPage <= 1} onClick={() => setPage(curPage - 1)}>
+            <ChevronLeft size={14} /> 上一页
+          </button>
+          <span className="mono" style={{ fontSize: 'var(--text-sm)', padding: '0 8px' }}>
+            {curPage} / {totalPages}（{filtered.length} 项）
+          </span>
+          <button className="btn" disabled={curPage >= totalPages} onClick={() => setPage(curPage + 1)}>
+            下一页 <ChevronRight size={14} />
+          </button>
+        </div>
       )}
     </div>
   );

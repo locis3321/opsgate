@@ -41,37 +41,34 @@ export default function Market() {
 
   return (
     <div className="page animate-slide-up">
-      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16 }}>
-        <div>
+      <div className="page-toolbar">
+        <div className="page-toolbar-main">
           <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 650, marginBottom: 4 }}>Market 目录</h1>
           <p style={{ color: 'var(--muted)', margin: 0, fontSize: 'var(--text-sm)' }}>
             实测通过的 MCP 服务目录，版本固化，一键实例化
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn" onClick={() => { void query.refetch(); void cats.refetch(); }} disabled={query.isFetching} style={{ gap: 6 }} title="重新拉取目录与分类">
+        <div className="page-toolbar-actions">
+          <div style={{ position: 'relative', flex: '0 1 220px', minWidth: 140 }}>
+            <Search size={15} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--meta)', pointerEvents: 'none' }} strokeWidth={1.8} />
+            <input className="input" style={{ paddingLeft: 34 }} placeholder="搜索名称或描述…" value={q} onChange={(e) => setQ(e.target.value)} />
+          </div>
+          <div style={{ minWidth: 128, flexShrink: 0 }}><Combobox
+            ariaLabel="分类筛选"
+            value={cat}
+            onChange={setCat}
+            placeholder="全部分类"
+            options={[{ value: '', label: '全部分类' }, ...(cats.data ?? []).map((c) => ({ value: c.category, label: c.category, hint: String(c.count) }))]}
+          /></div>
+          <button className="btn" style={{ flexShrink: 0, gap: 6 }} onClick={() => { void query.refetch(); void cats.refetch(); }} disabled={query.isFetching} title="重新拉取目录与分类">
             <RefreshCw size={14} strokeWidth={1.8} className={query.isFetching ? 'spin' : ''} /> 刷新
           </button>
           {isAdmin && (
-            <button className="btn" onClick={() => nav('/market/entries')} style={{ gap: 6 }}>
+            <button className="btn" style={{ flexShrink: 0, gap: 6 }} onClick={() => nav('/market/entries')}>
               <Settings2 size={14} strokeWidth={1.8} /> 管理目录
             </button>
           )}
         </div>
-      </div>
-
-      <div className="toolbar">
-        <div style={{ position: 'relative', flex: 1, maxWidth: 320 }}>
-          <Search size={15} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--meta)', pointerEvents: 'none' }} strokeWidth={1.8} />
-          <input className="input" style={{ paddingLeft: 34 }} placeholder="搜索名称或描述…" value={q} onChange={(e) => setQ(e.target.value)} />
-        </div>
-        <div style={{ minWidth: 150 }}><Combobox
-          ariaLabel="分类筛选"
-          value={cat}
-          onChange={setCat}
-          placeholder="全部分类"
-          options={[{ value: '', label: '全部分类' }, ...(cats.data ?? []).map((c) => ({ value: c.category, label: c.category, hint: String(c.count) }))]}
-        /></div>
       </div>
 
       {query.isError && (

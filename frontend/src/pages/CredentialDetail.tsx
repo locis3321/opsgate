@@ -1,7 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, KeyRound, Trash2, Eye, EyeOff, Pencil, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, KeyRound, Trash2, Eye, EyeOff, Pencil, AlertTriangle, Plus, Search, ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
 import { api, ApiError, fmtTs } from '../api';
 
 interface Detail {
@@ -13,6 +13,8 @@ interface Detail {
   sharedGroups?: Array<{ groupId: string; name: string }>;
   /** 后端判定：当前用户是否可管理（false = 只读查看共享凭证） */
   canManage?: boolean;
+  /** 被资产槽位实际取用的键（删除/改名这些键会让对应槽位取不到值） */
+  referencedKeys?: Array<{ key: string; servers: Array<{ serverId: string; name: string; slots: string[] }> }>;
 }
 
 interface GroupRow { id: string; name: string }
@@ -23,6 +25,8 @@ const PRIV_LABEL: Record<string, { label: string; color: string; bg: string }> =
   wo: { label: '只写', color: 'var(--warn)', bg: 'var(--warn-soft)' },
   ro: { label: '只读', color: 'var(--muted)', bg: 'var(--surface-raise)' },
 };
+/** 等级选择顺序（与创建弹窗一致） */
+const PRIV_ORDER = ['root', 'rw', 'wo', 'ro'] as const;
 
 /** 凭证详情（Spec §8.5 `/credentials/:id`）：概要 + 引用资产列表 + 删除前名单（§8.8 列对象清单）。 */
 export default function CredentialDetail() {
@@ -81,7 +85,8 @@ export default function CredentialDetail() {
         </div>
       </div>
 
-      <div className="card" style={{ padding: 20, display: 'grid', gap: 10, maxWidth: 640 }}>
+      {/* 各卡片统一全宽：此前 640/680/全宽混用，表格与编辑区左右边缘对不齐 */}
+      <div className="card" style={{ padding: 20, display: 'grid', gap: 10 }}>
         <Row k="类型" v={d.kind} />
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
           <div style={{ width: 100, color: 'var(--meta)', fontSize: 'var(--text-sm)', flexShrink: 0 }}>值提示</div>
@@ -132,35 +137,18 @@ export default function CredentialDetail() {
 
       <SharePanel credentialId={d.id} ownerId={d.ownerId} canManage={d.canManage} sharedGroups={d.sharedGroups ?? []} />
 
-      <div className="card" style={{ padding: 20 }}>
-        <div style={{ color: 'var(--fg-2)', fontWeight: 600, marginBottom: 12, fontSize: 'var(--text-sm)' }}>
-          引用资产（{d.boundServers.length}）
-        </div>
-        {d.boundServers.length === 0 ? (
-          <div style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>未被任何资产引用</div>
-        ) : (
-          <table className="dt">
-            <thead><tr><th>资产</th><th>类别</th><th>绑定槽位</th><th>ID</th></tr></thead>
-            <tbody>
-              {d.boundServers.map((s) => (
-                <tr key={s.serverId}>
-                  <td className="mono">{s.name}</td><td>{s.category}</td>
-                  <td className="mono" style={{ fontSize: 12 }}>{s.slots.join('、')}</td>
-                  <td className="mono">{s.serverId.slice(0, 10)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      <BoundServersCard servers={d.boundServers} />
 
       {err && <div style={{ color: 'var(--danger)', fontSize: 'var(--text-sm)', padding: '10px 14px', background: 'var(--danger-soft)', borderRadius: 'var(--radius)' }}>{err}</div>}
 
       {d.canManage !== false && (
         <EditValuesPanel
           credentialId={d.id}
+          name={d.name}
+          privileges={d.privileges ?? []}
+          referencedKeys={d.referencedKeys ?? []}
           boundCount={d.boundServers.length}
-          onSaved={() => { setErr(''); void qc.invalidateQueries({ queryKey: ['credential', id] }); }}
+          onSaved={() => { setErr(''); void qc.invalidateQueries({ queryKey: ['credential', id] }); void qc.invalidateQueries({ queryKey: ['credentials'] }); }}
           onError={(m: string) => setErr(m)}
         />
       )}
@@ -187,8 +175,83 @@ export default function CredentialDetail() {
   );
 }
 
-function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
+const BOUND_PAGE_SIZE = 15;
+
+/**
+ * 引用资产列表：一个 SSH 密钥常被上百台主机共用，全量平铺会把页面撑到几千像素。
+ * 这里做客户端分页 + 名称搜索（数据已在详情响应里，不额外请求）。
+ */
+function BoundServersCard({ servers }: { servers: Array<{ serverId: string; name: string; category: string; slots: string[] }> }) {
+  const [page, setPage] = useState(1);
+  const [kw, setKw] = useState('');
+
+  const filtered = useMemo(() => {
+    const q = kw.trim().toLowerCase();
+    if (!q) return servers;
+    return servers.filter((s) => s.name.toLowerCase().includes(q) || s.category.toLowerCase().includes(q));
+  }, [servers, kw]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / BOUND_PAGE_SIZE));
+  const curPage = Math.min(page, totalPages);
+  const rows = filtered.slice((curPage - 1) * BOUND_PAGE_SIZE, curPage * BOUND_PAGE_SIZE);
+
   return (
+    <div className="card" style={{ padding: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        <span style={{ color: 'var(--fg-2)', fontWeight: 600, fontSize: 'var(--text-sm)' }}>
+          引用资产（{servers.length}）
+        </span>
+        {servers.length > 0 && (
+          <div style={{ position: 'relative', marginLeft: 'auto', flex: '0 1 260px', minWidth: 160 }}>
+            <Search size={14} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: 'var(--meta)', pointerEvents: 'none' }} strokeWidth={1.8} />
+            <input
+              className="input"
+              style={{ paddingLeft: 30 }}
+              placeholder="搜索资产名 / 类别"
+              value={kw}
+              onChange={(e) => { setKw(e.target.value); setPage(1); }}
+              aria-label="搜索引用资产"
+            />
+          </div>
+        )}
+      </div>
+
+      {servers.length === 0 ? (
+        <div style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>未被任何资产引用</div>
+      ) : filtered.length === 0 ? (
+        <div style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>无匹配资产</div>
+      ) : (
+        <>
+          <table className="dt">
+            <thead><tr><th>资产</th><th>类别</th><th>绑定槽位</th><th>ID</th></tr></thead>
+            <tbody>
+              {rows.map((s) => (
+                <tr key={s.serverId}>
+                  <td className="mono">{s.name}</td><td>{s.category}</td>
+                  <td className="mono" style={{ fontSize: 12 }}>{s.slots.join('、')}</td>
+                  <td className="mono">{s.serverId.slice(0, 10)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', marginTop: 12 }}>
+            <button className="btn" disabled={curPage <= 1} onClick={() => setPage(curPage - 1)}>
+              <ChevronLeft size={14} /> 上一页
+            </button>
+            <span className="mono" style={{ fontSize: 'var(--text-sm)', padding: '0 8px' }}>
+              {curPage} / {totalPages}（{filtered.length} 项）
+            </span>
+            <button className="btn" disabled={curPage >= totalPages} onClick={() => setPage(curPage + 1)}>
+              下一页 <ChevronRight size={14} />
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {  return (
     <div style={{ display: 'flex', alignItems: 'baseline' }}>
       <div style={{ width: 100, color: 'var(--meta)', fontSize: 'var(--text-sm)', flexShrink: 0 }}>{k}</div>
       <div className={mono ? 'mono' : ''} style={{ fontSize: 'var(--text-sm)' }}>{v || '无'}</div>
@@ -240,13 +303,40 @@ function SharePanel({
   });
 
   const rows = groups.data ?? [];
+  const sharedCount = rows.filter((g) => sharedSet.has(g.id)).length;
+  // 默认折叠：共享是低频操作，展开的开关列表会占掉首屏大量纵向空间
+  const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="card" style={{ padding: 20, maxWidth: 640 }}>
-      <div style={{ color: 'var(--fg-2)', fontWeight: 600, marginBottom: 4, fontSize: 'var(--text-sm)' }}>
-        共享至分组
-      </div>
-      <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)', marginBottom: 12 }}>
+    <div className="card" style={{ padding: 20 }}>
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+          background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left',
+        }}
+      >
+        <span style={{ color: 'var(--fg-2)', fontWeight: 600, fontSize: 'var(--text-sm)' }}>共享至分组</span>
+        <span className="tag" style={{ fontSize: 11 }}>
+          {sharedCount > 0 ? `已共享 ${sharedCount}` : '未共享'}
+        </span>
+        <span style={{ flex: 1 }} />
+        <ChevronDown
+          size={15}
+          strokeWidth={1.8}
+          style={{ color: 'var(--meta)', transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 120ms' }}
+        />
+      </button>
+      {!expanded && (
+        <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)', marginTop: 4 }}>
+          共享后，分组成员可在资产中使用此凭证（不能绑定到自己的资产）
+        </div>
+      )}
+      {expanded && (
+        <>
+      <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)', margin: '8px 0 12px' }}>
         {canEdit
           ? '共享后，该分组成员可在资产中"使用"此凭证，但不能把它绑定到自己的资产上；未共享的分组看不到它'
           : '仅凭证归属人可修改共享范围'}
@@ -289,33 +379,51 @@ function SharePanel({
           })}
         </div>
       )}
+        </>
+      )}
     </div>
   );
 }
 
 /**
- * 编辑凭证值（轮换）。改动值会让**所有绑定资产**的实例键失效并重建（后端 credential_rotate 副作用）。
+ * 编辑凭证（名称 / 等级 / 键集合）。键可以新增、删除、改名（改名 = 删旧键 + 加新键），保存时整份集合提交。
+ * 改动值会让**所有绑定资产**的实例键失效并重建（后端 credential_rotate 副作用）。
  * 为什么不去凭证列表页做：这里能直接看到"会影响哪些资产"，避免误改。
  */
 function EditValuesPanel({
-  credentialId, boundCount, onSaved, onError,
+  credentialId, name, privileges, referencedKeys, boundCount, onSaved, onError,
 }: {
   credentialId: string;
+  name: string;
+  privileges: string[];
+  referencedKeys: Array<{ key: string; servers: Array<{ serverId: string; name: string; slots: string[] }> }>;
   boundCount: number;
   onSaved: () => void;
   onError: (m: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [vals, setVals] = useState<Record<string, string>>({});
-  const [reveal, setReveal] = useState<Record<string, boolean>>({});
+  const [rows, setRows] = useState<Array<{ key: string; value: string }>>([]);
+  const [origKeys, setOrigKeys] = useState<string[]>([]);
+  const [reveal, setReveal] = useState<Record<number, boolean>>({});
+  const [draftName, setDraftName] = useState(name);
+  const [draftPriv, setDraftPriv] = useState<string[]>(privileges);
   const [loading, setLoading] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [localErr, setLocalErr] = useState('');
+
+  const refMap = new Map(referencedKeys.map((r) => [r.key, r.servers]));
 
   const loadCurrent = async () => {
     setLoading(true);
     try {
       const d = await api<{ values: Record<string, string> }>(`/api/v1/credentials/${credentialId}/reveal`);
-      setVals(d.values);
+      const list = Object.entries(d.values).map(([key, value]) => ({ key, value }));
+      setRows(list);
+      setOrigKeys(list.map((x) => x.key));
+      setDraftName(name);
+      setDraftPriv(privileges);
+      setReveal({});
+      setLocalErr('');
       setOpen(true);
     } catch (e) {
       onError(e instanceof ApiError ? e.message : '读取当前值失败');
@@ -324,9 +432,33 @@ function EditValuesPanel({
     }
   };
 
+  const dupKeys = new Set<string>();
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const k = r.key.trim();
+    if (!k) continue;
+    if (seen.has(k)) dupKeys.add(k);
+    seen.add(k);
+  }
+  const emptyKeyRow = rows.some((r) => r.key.trim() === '');
+  const noValue = rows.every((r) => r.value.trim() === '');
+  const canSave = !dupKeys.size && !emptyKeyRow && !noValue;
+
+  /** 已删除或改名的原键（这些键不再存在于提交集合中） */
+  const removingKeys = origKeys.filter((k) => !seen.has(k));
+
   const save = useMutation({
-    mutationFn: (values: Record<string, string>) =>
-      api(`/api/v1/credentials/${credentialId}`, { method: 'PATCH', body: JSON.stringify({ values }) }),
+    mutationFn: () => {
+      const values: Record<string, string> = {};
+      for (const r of rows) {
+        const k = r.key.trim();
+        if (k) values[k] = r.value;
+      }
+      const body: Record<string, unknown> = { values };
+      if (draftName.trim() && draftName.trim() !== name) body.name = draftName.trim();
+      if (JSON.stringify([...draftPriv].sort()) !== JSON.stringify([...privileges].sort())) body.privileges = draftPriv;
+      return api(`/api/v1/credentials/${credentialId}`, { method: 'PATCH', body: JSON.stringify(body) });
+    },
     onSuccess: () => { setOpen(false); setConfirming(false); onSaved(); },
     onError: (e) => onError(e instanceof ApiError ? e.message : '保存失败'),
   });
@@ -334,7 +466,7 @@ function EditValuesPanel({
   if (!open) {
     return (
       <button className="btn" onClick={() => void loadCurrent()} disabled={loading} style={{ gap: 6 }}>
-        <Pencil size={14} strokeWidth={1.8} /> {loading ? '读取中…' : '编辑凭证值'}
+        <Pencil size={14} strokeWidth={1.8} /> {loading ? '读取中…' : '编辑凭证'}
       </button>
     );
   }
@@ -343,40 +475,104 @@ function EditValuesPanel({
     <div className="card" style={{ padding: 20, display: 'grid', gap: 12, maxWidth: 680 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <Pencil size={15} strokeWidth={1.8} style={{ color: 'var(--accent)' }} />
-        <span style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>编辑凭证值</span>
+        <span style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>编辑凭证</span>
         <button className="btn" style={{ marginLeft: 'auto' }} onClick={() => { setOpen(false); setConfirming(false); }}>取消</button>
       </div>
 
-      {Object.keys(vals).length === 0 && (
-        <div style={{ color: 'var(--meta)', fontSize: 'var(--text-sm)' }}>该凭证没有可编辑的键。</div>
+      <div style={{ display: 'grid', gap: 4 }}>
+        <label style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>名称</label>
+        <input className="input mono" value={draftName} onChange={(e) => setDraftName(e.target.value)} />
+      </div>
+
+      <div style={{ display: 'grid', gap: 4 }}>
+        <label style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>权限等级（可选，仅展示不参与授权）</label>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {PRIV_ORDER.map((key) => {
+            const m = PRIV_LABEL[key]!;
+            const on = draftPriv.includes(key);
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setDraftPriv(on ? draftPriv.filter((x) => x !== key) : [...draftPriv, key])}
+                style={{
+                  fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer', fontWeight: 600,
+                  border: `1px solid ${on ? m.color : 'var(--border)'}`,
+                  color: on ? m.color : 'var(--muted)',
+                  background: on ? m.bg : 'transparent',
+                }}
+              >
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ color: 'var(--fg-2)', fontSize: 'var(--text-sm)', fontWeight: 600 }}>键值</span>
+        <span style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)' }}>共 {rows.length} 个键</span>
+        <button
+          type="button"
+          className="btn"
+          style={{ marginLeft: 'auto', gap: 4, fontSize: 'var(--text-xs)', padding: '2px 8px' }}
+          onClick={() => setRows([...rows, { key: '', value: '' }])}
+        >
+          <Plus size={12} strokeWidth={2} /> 添加键
+        </button>
+      </div>
+
+      {rows.length === 0 && (
+        <div style={{ color: 'var(--meta)', fontSize: 'var(--text-sm)' }}>该凭证没有键；点击「添加键」新建。</div>
       )}
 
-      {Object.entries(vals).map(([k, v]) => {
+      {rows.map((r, i) => {
+        const k = r.key.trim();
         const secret = /pass|secret|token|api|key|private|credential|kubeconfig/i.test(k);
-        const shown = reveal[k];
-        // 多行内容（kubeconfig / 私钥 / JSON）必须用 textarea：单行 input 会把换行压掉，
-        // 用户改一个字符就可能把整份 YAML 压成一行、彻底失效。
-        const isMultiline = /kubeconfig|private|key|pem|cert|json|yaml/i.test(k) || /\n/.test(v);
+        const shown = reveal[i];
+        const isMultiline = /kubeconfig|private|key|pem|cert|json|yaml/i.test(k) || /\n/.test(r.value);
+        const refs = refMap.get(k);
+        const dup = k !== '' && dupKeys.has(k);
         return (
-          <div key={k} style={{ display: 'grid', gap: 4 }}>
-            <label style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)' }} className="mono">{k}</label>
+          <div key={i} style={{ display: 'grid', gap: 4 }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                className="input mono"
+                style={{ flex: 1, ...(dup ? { borderColor: 'var(--danger)' } : {}) }}
+                placeholder="键名"
+                value={r.key}
+                onChange={(e) => setRows(rows.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)))}
+              />
+              <button
+                type="button"
+                className="btn btn-danger"
+                style={{ padding: '4px 8px', flexShrink: 0 }}
+                title="删除该键"
+                aria-label={`删除键 ${k || i + 1}`}
+                onClick={() => setRows(rows.filter((_, j) => j !== i))}
+              >
+                <Trash2 size={14} strokeWidth={1.8} />
+              </button>
+            </div>
             <div style={{ position: 'relative' }}>
               {isMultiline ? (
                 <textarea
                   className="input mono"
-                  rows={Math.min(18, Math.max(6, v.split('\n').length + 1))}
+                  rows={Math.min(18, Math.max(4, r.value.split('\n').length + 1))}
                   style={{ width: '100%', paddingRight: secret ? 36 : 12, boxSizing: 'border-box', resize: 'vertical' }}
                   spellCheck={false}
-                  value={v}
-                  onChange={(e) => setVals((p) => ({ ...p, [k]: e.target.value }))}
+                  placeholder="值"
+                  value={r.value}
+                  onChange={(e) => setRows(rows.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))}
                 />
               ) : (
                 <input
                   className="input mono"
                   style={{ width: '100%', paddingRight: secret ? 36 : 12, boxSizing: 'border-box' }}
                   type={secret && !shown ? 'password' : 'text'}
-                  value={v}
-                  onChange={(e) => setVals((p) => ({ ...p, [k]: e.target.value }))}
+                  placeholder="值"
+                  value={r.value}
+                  onChange={(e) => setRows(rows.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))}
                   autoComplete="new-password"
                 />
               )}
@@ -385,25 +581,56 @@ function EditValuesPanel({
                   type="button"
                   className="icon-btn"
                   style={{ position: 'absolute', right: 2, top: 4, width: 28, height: 28 }}
-                  onClick={() => setReveal((r) => ({ ...r, [k]: !r[k] }))}
+                  onClick={() => setReveal((p) => ({ ...p, [i]: !p[i] }))}
                   aria-label={shown ? `隐藏 ${k}` : `显示 ${k}`}
                 >
                   {shown ? <EyeOff size={14} strokeWidth={1.8} /> : <Eye size={14} strokeWidth={1.8} />}
                 </button>
               )}
             </div>
-            {isMultiline && !shown && (
-              <span style={{ color: 'var(--meta)', fontSize: 12 }}>
-                多行内容：请用上方文本框编辑（会保留换行与缩进）。
+            {dup && <span style={{ color: 'var(--danger)', fontSize: 12 }}>键名重复</span>}
+            {refs && (
+              // 只给一行通用提示：完整清单在下方的「引用资产」卡片里（已分页），
+              // 这里展开列出 115 条资产名会把编辑区撑到几千像素（用户反馈）。
+              <span style={{ color: 'var(--warn)', fontSize: 12 }}>
+                该键正被 {refs.length} 个资产的槽位取用，删除或改名后这些槽位将取不到值
               </span>
             )}
           </div>
         );
       })}
 
+      {removingKeys.length > 0 && (
+        <div style={{
+          display: 'flex', gap: 8, alignItems: 'flex-start', padding: '8px 12px',
+          background: 'var(--warn-soft)', border: '1px solid var(--security-warn-border)', borderRadius: 'var(--r-md)',
+        }}>
+          <AlertTriangle size={15} strokeWidth={2} style={{ color: 'var(--warn)', flexShrink: 0, marginTop: 1 }} />
+          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--fg-2)' }}>
+            将删除键：{removingKeys.map((k) => <span key={k} className="mono" style={{ marginRight: 6 }}>{k}</span>)}
+            {removingKeys.some((k) => refMap.has(k)) && (
+              <><br /><span style={{ color: 'var(--warn)' }}>
+                其中 {removingKeys.filter((k) => refMap.has(k)).join('、')} 正被资产槽位取用，删除后这些槽位将在调用时报错。
+              </span></>
+            )}
+          </span>
+        </div>
+      )}
+
+      {localErr && <div style={{ color: 'var(--danger)', fontSize: 'var(--text-sm)' }}>{localErr}</div>}
+
       {!confirming ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <button className="btn btn-primary" onClick={() => setConfirming(true)} disabled={save.isPending}>保存并轮换</button>
+          <button
+            className="btn btn-primary"
+            onClick={() => {
+              if (!canSave) { setLocalErr(emptyKeyRow ? '存在空键名' : dupKeys.size ? '键名重复' : '至少一个非空值'); return; }
+              setLocalErr('');
+              setConfirming(true);
+            }}
+          >
+            保存并轮换
+          </button>
           {boundCount > 0 && (
             <span style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)' }}>
               保存后将重建 {boundCount} 个绑定资产的实例
@@ -416,7 +643,7 @@ function EditValuesPanel({
           <span style={{ flex: 1, minWidth: 200, fontSize: 'var(--text-sm)', color: 'var(--fg-2)' }}>
             确认修改？现有 {boundCount} 个已启动的资产实例会被回收并在下次调用时用新凭证重建。
           </span>
-          <button className="btn btn-primary" onClick={() => save.mutate(vals)} disabled={save.isPending}>
+          <button className="btn btn-primary" onClick={() => save.mutate()} disabled={save.isPending}>
             {save.isPending ? '保存中…' : '确认修改'}
           </button>
           <button className="btn" onClick={() => setConfirming(false)}>取消</button>

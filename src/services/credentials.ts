@@ -113,7 +113,7 @@ export class CredentialService {
     const rows = this.sqlite
       .prepare(
         `SELECT sc.user_id AS userId, sc.scope AS scope, sc.username AS bindingUsername, c.id AS credentialId,
-                c.encrypted_values AS encrypted, c.updated_at AS updatedAt, c.privileges AS privileges
+                c.name AS credName, c.encrypted_values AS encrypted, c.updated_at AS updatedAt, c.privileges AS privileges
          FROM server_credentials sc JOIN credentials c ON c.id = sc.credential_id
          WHERE sc.server_id = ? AND sc.slot_name = ?`,
       )
@@ -122,22 +122,17 @@ export class CredentialService {
       scope: string;
       bindingUsername: string | null;
       credentialId: string;
+      credName: string;
       encrypted: string;
       updatedAt: number;
       privileges: string;
     }>;
     if (rows.length === 0) return null;
-    // 与 resolveSlotValues 同口径：personal（本人）优先，其次 asset 里权限最高的
+    // 与 resolveSlotValues 同口径：personal（本人）优先，其次 asset；同分按管理账号 + 稳定序
     let picked = userId !== undefined
-      ? rows
-          .filter((r) => r.scope === 'personal' && r.userId === userId)
-          .sort((a, b) => privilegeRank(a.privileges) - privilegeRank(b.privileges))[0]
+      ? pickBestBinding(rows.filter((r) => r.scope === 'personal' && r.userId === userId))
       : undefined;
-    if (!picked) {
-      picked = rows
-        .filter((r) => r.scope === 'asset')
-        .sort((a, b) => privilegeRank(a.privileges) - privilegeRank(b.privileges))[0];
-    }
+    if (!picked) picked = pickBestBinding(rows.filter((r) => r.scope === 'asset'));
     if (!picked) return null;
     // 绑定级用户名优先：绑定上显式填了就是它，无需解密凭证
     if (key === 'username' && picked.bindingUsername && picked.bindingUsername.trim() !== '') {
@@ -223,8 +218,8 @@ export class CredentialService {
       .prepare(
         `SELECT sc.slot_name AS slotName, sc.user_id AS userId, sc.scope AS scope,
                 sc.username AS bindingUsername, sc.credential_key AS credentialKey,
-                c.id AS credentialId, c.encrypted_values AS encrypted, c.updated_at AS updatedAt,
-                c.privileges AS privileges
+                c.id AS credentialId, c.name AS credName, c.encrypted_values AS encrypted,
+                c.updated_at AS updatedAt, c.privileges AS privileges
          FROM server_credentials sc JOIN credentials c ON c.id = sc.credential_id
          WHERE sc.server_id = ? AND sc.slot_name IN (${placeholders})`,
       )
@@ -235,12 +230,13 @@ export class CredentialService {
       bindingUsername: string | null;
       credentialKey: string | null;
       credentialId: string;
+      credName: string;
       encrypted: string;
       updatedAt: number;
       privileges: string;
     }>;
 
-    /** 每槽位：personal（本人）一条；asset 取 privileges 优先级最高的一条；指定凭证可覆盖二者 */
+    /** 每槽位：personal（本人）一条；asset 取优先级最高的一条；指定凭证可覆盖二者 */
     const personal = new Map<string, (typeof rows)[number]>();
     const asset = new Map<string, (typeof rows)[number]>();
     const preferred = new Map<string, (typeof rows)[number]>();
@@ -251,17 +247,20 @@ export class CredentialService {
         const visible = r.scope === 'asset' || (userId !== undefined && r.userId === userId);
         if (visible) preferred.set(r.slotName, r);
       }
-      if (r.scope === 'personal') {
-        if (userId && r.userId === userId) {
-          // 一槽多凭证后本人可能同时绑了 root 与 dev：按 privileges 取权限最高的那条
-          // （与 asset 侧同规则），避免"随机取到一条"。
-          const cur = personal.get(r.slotName);
-          if (!cur || privilegeRank(r.privileges) < privilegeRank(cur.privileges)) personal.set(r.slotName, r);
-        }
-        continue;
-      }
-      const cur = asset.get(r.slotName);
-      if (!cur || privilegeRank(r.privileges) < privilegeRank(cur.privileges)) asset.set(r.slotName, r);
+    }
+    // 按槽位分组后用统一择优（同分取管理账号 + 稳定序），不依赖行序
+    const bySlot = new Map<string, Array<(typeof rows)[number]>>();
+    for (const r of rows) {
+      const arr = bySlot.get(r.slotName) ?? [];
+      arr.push(r);
+      bySlot.set(r.slotName, arr);
+    }
+    for (const [slot, list] of bySlot) {
+      const mine = userId !== undefined ? list.filter((r) => r.scope === 'personal' && r.userId === userId) : [];
+      const p = pickBestBinding(mine);
+      if (p) personal.set(slot, p);
+      const a = pickBestBinding(list.filter((r) => r.scope === 'asset'));
+      if (a) asset.set(slot, a);
     }
 
     const inline = this.slotValuesOf(assetId);
@@ -333,18 +332,31 @@ function pickSlotValue(
   slot: string,
   credentialKey?: string | null,
 ): unknown {
+  const key = resolveSlotKey(values, slot, credentialKey);
+  return key === undefined ? undefined : values[key];
+}
+
+/**
+ * 该槽位最终会从凭证里读哪个键（与 pickSlotValue 同一规则，独立导出供"删除键影响哪些槽位"使用）。
+ * 返回 undefined = 当前键集合下这个槽位取不到值。
+ */
+export function resolveSlotKey(
+  values: Record<string, unknown>,
+  slot: string,
+  credentialKey?: string | null,
+): string | undefined {
   if (credentialKey) {
     const v = values[credentialKey];
-    return typeof v === 'string' && v !== '' ? v : undefined;
+    return typeof v === 'string' && v !== '' ? credentialKey : undefined;
   }
 
   const direct = values[slot];
-  if (typeof direct === 'string' && direct !== '') return direct;
+  if (typeof direct === 'string' && direct !== '') return slot;
 
   // 前缀/大小写/下划线差异（槽位带品类前缀，凭证键是通用名）
   const target = normalizeSlotKey(slot);
   for (const [k, v] of Object.entries(values)) {
-    if (normalizeSlotKey(k) === target && typeof v === 'string' && v !== '') return v;
+    if (normalizeSlotKey(k) === target && typeof v === 'string' && v !== '') return k;
   }
   return undefined;
 }
@@ -366,4 +378,38 @@ export function privilegeRank(privilegesJson: string | null | undefined): number
   if (list.includes('wo')) return 2;
   if (list.includes('ro')) return 3;
   return 4;
+}
+
+/** 管理类账号的识别（凭证名或绑定用户名） */
+const ADMINISH_RE = /(^|[-_. ])(root|admin|administrator|superuser|superadmin)([-_. ]|$)/i;
+
+function isAdminishCredential(credName: string | null | undefined, bindingUsername: string | null | undefined): boolean {
+  return ADMINISH_RE.test(credName ?? '') || ADMINISH_RE.test(bindingUsername ?? '');
+}
+
+export interface RankedBinding {
+  credentialId: string;
+  privileges: string;
+  credName?: string | null;
+  bindingUsername?: string | null;
+}
+
+/**
+ * 同槽位多凭证的确定性择优（用户 2026-11-19 决策）。
+ *
+ * 排序键依次为：①权限等级 → ②管理类账号优先 → ③credentialId 字典序。
+ * 为什么需要 ②③：迁移后大量资产一槽两三个同为 admin 的账号（如 root 与业务账号），
+ * 只按等级排序时同分结果取决于 SQLite 行序 —— 同份数据在不同机器可能取到不同账号。
+ * ②③ 让结果可复现，且默认落到权限面符合直觉的管理账号上。
+ */
+export function pickBestBinding<T extends RankedBinding>(rows: T[]): T | undefined {
+  if (rows.length === 0) return undefined;
+  return [...rows].sort((a, b) => {
+    const byRank = privilegeRank(a.privileges) - privilegeRank(b.privileges);
+    if (byRank !== 0) return byRank;
+    const aAdmin = isAdminishCredential(a.credName, a.bindingUsername) ? 0 : 1;
+    const bAdmin = isAdminishCredential(b.credName, b.bindingUsername) ? 0 : 1;
+    if (aAdmin !== bAdmin) return aAdmin - bAdmin;
+    return a.credentialId < b.credentialId ? -1 : a.credentialId > b.credentialId ? 1 : 0;
+  })[0];
 }

@@ -26,3 +26,6 @@ test/opencode/
 .workbuddy/
 .e2e/
 .qoder/
+
+# 迁移工作区：含 v1 真实资产清单与内网地址，永不入库（AGENTS.md §11）
+.migration/

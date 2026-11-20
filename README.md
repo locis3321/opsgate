@@ -421,7 +421,7 @@ pnpm run seed                # 写入种子数据（内置规则、Market 目录
 | [`docs/project-rules.md`](docs/project-rules.md) | 编码硬约束与不可协商红线 |
 | [`docs/project-facts.md`](docs/project-facts.md) | 关键常量、错误码、构建命令 |
 | [`docs/deploy.md`](docs/deploy.md) | 部署、备份、迁移、已知限制 |
-| [`docs/adr-028.md`](docs/adr-028.md) ~ [`adr-033.md`](docs/adr-033.md) | 架构决策记录 |
+| [`docs/adr-028.md`](docs/adr-028.md) ~ [`adr-033.md`](docs/adr-033.md) | 架构决策记录（ADR-034 同槽位多凭证的确定性择优见 Spec §10） |
 
 ---
 

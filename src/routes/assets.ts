@@ -19,12 +19,14 @@ import { DEFAULT_GROUP_BY_CATEGORY } from '../framework/types.js';
 import { buildInstanceKey, transportOf } from '../services/instancePlan.js';
 import { assertUrlAllowed, SsrfError } from '../services/ssrf.js';
 import { validateCredentialValues } from '../services/credentialValidation.js';
+import { normalizeTags } from '../services/assetTags.js';
 import { makeHandle } from '../native/connectors/http.js';
 import { insecureFetch } from '../native/connectors/insecureFetch.js';
 import type { AuditService } from '../services/audit.js';
 import type { InstancePool } from '../services/instancePool.js';
 import type { SshConnector } from '../native/connectors/ssh.js';
 import type { CredentialService } from '../services/credentials.js';
+import { pickBestBinding, resolveSlotKey } from '../services/credentials.js';
 import { buildPlan, makeRefResolver } from '../services/instancePlan.js';
 import type { RouteDefinition } from './registry.js';
 
@@ -273,6 +275,29 @@ function normalizeCredentialKey(v: string | null | undefined): string | null {
   return t === '' ? null : t;
 }
 
+/**
+ * 掩码提示（列表 `值提示` 列）：优先取敏感键的末 4 位，没有敏感键则取首个值的末 4 位。
+ * 创建与 PATCH 共用同一份规则——改值后掩码必须跟着变，否则用户会以为没保存成功。
+ */
+const HINT_KEY_RE = /passwd|password|secret|token|private|api[_-]?key|access|auth|credential/i;
+function hintOf(values: Record<string, string>): string {
+  const keys = Object.keys(values);
+  const hintKey = keys.find((k) => HINT_KEY_RE.test(k)) ?? keys[0]!;
+  return `****${values[hintKey]!.slice(-4)}`;
+}
+
+/** 丢弃全空白值；返回 null 表示清洗后没有任何可用的值（空凭证一律拒绝） */
+function cleanValues(raw: Record<string, string>): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const key = k.trim();
+    if (!key || typeof v !== 'string') continue;
+    if (v.trim() === '') continue;
+    out[key] = v;
+  }
+  return Object.keys(out).length === 0 ? null : out;
+}
+
 export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
   const { db, audit } = deps;
 
@@ -342,6 +367,30 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           data: { totalAssets: rows.length, publicCount, missingCredAssets },
           message: 'ok',
         });
+      },
+    },
+    {
+      /**
+       * 已有标签枚举（供前端"从已有标签选"，避免 prod/Prod/生产 这类近义重复把 `?tag=` 筛坏）。
+       * 只统计当前用户可见的资产；按出现次数降序，同次数按字典序。
+       */
+      method: 'GET',
+      url: '/api/v1/servers/tags',
+      accessMode: 'session',
+      handler: async (req: FastifyRequest, reply: FastifyReply) => {
+        const rows = await visibleServers(req.principal!);
+        const counter = new Map<string, number>();
+        for (const r of rows) {
+          for (const t of ((r.tags as string[] | null) ?? [])) {
+            const tag = typeof t === 'string' ? t.trim() : '';
+            if (!tag) continue;
+            counter.set(tag, (counter.get(tag) ?? 0) + 1);
+          }
+        }
+        const data = [...counter.entries()]
+          .map(([tag, count]) => ({ tag, count }))
+          .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+        return reply.send({ code: 0, data, message: 'ok' });
       },
     },
     {
@@ -495,7 +544,7 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           name?: string; displayName?: string; description?: string;
           type?: string; executionMode?: string; category?: string;
           hostConn?: Record<string, unknown>; command?: string; args?: unknown; env?: unknown;
-          url?: string; headers?: Record<string, unknown>; tags?: string[]; credentialSlots?: unknown[];
+          url?: string; headers?: Record<string, unknown>; tags?: unknown; credentialSlots?: unknown[];
           /** 允许不安全 TLS（自签证书）；默认 false */
           allowInsecureTls?: boolean;
           /** 槽位凭证绑定（创建即绑定）：slotName → credentialId */
@@ -552,6 +601,9 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         if ((body.credentialSlots?.length ?? 0) > deps.settings.get<number>('credentials.max_slots')) {
           return reply.code(400).send({ code: 400, data: null, message: `凭证槽位数超过上限（credentials.max_slots）` });
         }
+        // 标签参与 `?tag=` 精确匹配：创建路径与 PATCH 用同一份归一规则
+        const tagsNorm = normalizeTags(body.tags ?? []);
+        if ('error' in tagsNorm) return reply.code(400).send({ code: 400, data: null, message: tagsNorm.error });
         // ref.<凭证名>.<键名> 保存校验（引用存在 + 本人创建，ADR-028；fail-closed）
         const refErr = await validateRefs(db, p, { env: body.env, args: body.args, headers: body.headers });
         if (refErr) return reply.code(400).send({ code: 400, data: null, message: refErr });
@@ -614,7 +666,7 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
               executionMode,
               category,
               hostConn: (body.hostConn ?? null) as object | null,
-              tags: body.tags ?? [],
+              tags: tagsNorm.tags,
               command: body.command ?? null,
               args: (body.args ?? null) as unknown[] | null,
               env: (body.env ?? null) as object | null,
@@ -734,11 +786,16 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         const row = await db.select().from(schema.servers).where(eq(schema.servers.id, id)).get();
         if (!row) return reply.code(404).send({ code: 404, data: null, message: '资产不存在' });
         if (row.ownerId !== p.userId && !p.isAdmin) return reply.code(403).send({ code: 403, data: null, message: 'Forbidden' });
-        const body = req.body as { visibility?: string; sharedWithUserIds?: string[]; displayName?: string; description?: string; tags?: string[]; allowPrivateNetwork?: boolean; allowInsecureTls?: boolean; credentialSlots?: Array<{ target: string; name: string; label: string; file: boolean }>; url?: string; enabled?: boolean };
+        const body = req.body as { visibility?: string; sharedWithUserIds?: string[]; displayName?: string; description?: string; tags?: unknown; allowPrivateNetwork?: boolean; allowInsecureTls?: boolean; credentialSlots?: Array<{ target: string; name: string; label: string; file: boolean }>; url?: string; enabled?: boolean };
         const patch: Record<string, unknown> = {};
         if (body.displayName !== undefined) patch.displayName = body.displayName;
         if (body.description !== undefined) patch.description = body.description;
-        if (body.tags !== undefined) patch.tags = body.tags;
+        if (body.tags !== undefined) {
+          // 标签参与 `?tag=` 精确匹配，写入侧必须归一（去空白/去重/限长限数），否则筛选项会被脏值污染
+          const r = normalizeTags(body.tags);
+          if ('error' in r) return reply.code(400).send({ code: 400, data: null, message: r.error });
+          patch.tags = r.tags;
+        }
         if (body.enabled !== undefined) {
           if (typeof body.enabled !== 'boolean') {
             return reply.code(400).send({ code: 400, data: null, message: 'enabled 仅 boolean' });
@@ -862,6 +919,7 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
             bindingCredentialKey: schema.serverCredentials.credentialKey,
             name: schema.credentials.name,
             valueHint: schema.credentials.valueHint,
+            privileges: schema.credentials.privileges,
           })
           .from(schema.serverCredentials)
           .leftJoin(schema.credentials, eq(schema.serverCredentials.credentialId, schema.credentials.id))
@@ -892,8 +950,20 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
             credentialKey: b.bindingCredentialKey,
             mine: b.userId === req.principal!.userId,
           }));
-          // 兼容字段：优先展示"我自己的"第一条，否则第一条（前端旧列仍可读）
-          const primary = binds.find((b) => b.mine) ?? binds[0];
+          // 主凭证 = 运行时实际会用到的那一条（personal 本人优先，再按等级/管理账号/稳定序），
+          // 与 resolveSlotValues 共用 pickBestBinding，避免"界面显示 A、实际注入 B"
+          const mine = binds.filter((b) => b.mine);
+          const best = pickBestBinding(
+            (mine.length > 0 ? mine : binds.filter((b) => b.scope === 'asset')).map((b) => ({
+              credentialId: b.credentialId,
+              privileges: JSON.stringify(
+                (bindingsBySlot.get(s.name) ?? []).find((x) => x.credentialId === b.credentialId)?.privileges ?? [],
+              ),
+              credName: b.credentialName,
+              bindingUsername: b.username,
+            })),
+          );
+          const primary = best ? binds.find((b) => b.credentialId === best.credentialId) : undefined;
           const inline = direct.get(s.name);
           return {
             slotName: s.name,
@@ -1422,15 +1492,14 @@ export function makeCredentialRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         // 结构性内容（kubeconfig / 私钥）保存前校验：坏格式在源头拦下，不留到下游"连不上"
         const valuesErr = validateCredentialValues(kind, body.values);
         if (valuesErr) return reply.code(400).send({ code: 400, data: null, message: valuesErr });
+        // 空值/空白值在写入点丢弃：空凭证没有可用值，运行期所有槽位都会 fail-closed
+        const cleaned = cleanValues(body.values);
+        if (!cleaned) return reply.code(400).send({ code: 400, data: null, message: '至少提供一个非空值' });
         const id = `cred-${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-        const encrypted = encryptCredential(deps.cryptoKey, id, JSON.stringify(body.values));
-        // 掩码提示取敏感键（password/secret/token/private/access 等），否则取首个值
-        const HINT_KEY_RE = /passwd|password|secret|token|private|api[_-]?key|access|auth|credential/i;
-        const hintKey = Object.keys(body.values).find((k) => HINT_KEY_RE.test(k)) ?? Object.keys(body.values)[0]!;
-        const firstValue = body.values[hintKey]!;
+        const encrypted = encryptCredential(deps.cryptoKey, id, JSON.stringify(cleaned));
         const row = await db
           .insert(schema.credentials)
-          .values({ id, name: body.name, kind, encryptedValues: encrypted, valueHint: `****${firstValue.slice(-4)}`, ownerId: p.userId, privileges })
+          .values({ id, name: body.name, kind, encryptedValues: encrypted, valueHint: hintOf(cleaned), ownerId: p.userId, privileges })
           .returning({ id: schema.credentials.id, name: schema.credentials.name })
           .get();
         return reply.send({ code: 0, data: row, message: 'ok' });
@@ -1457,6 +1526,7 @@ export function makeCredentialRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
             category: schema.servers.category,
             owner: schema.servers.ownerId,
             slotName: schema.serverCredentials.slotName,
+            credentialKey: schema.serverCredentials.credentialKey,
           })
           .from(schema.serverCredentials)
           .innerJoin(schema.servers, eq(schema.servers.id, schema.serverCredentials.serverId))
@@ -1492,6 +1562,30 @@ export function makeCredentialRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           .leftJoin(schema.groups, eq(schema.groups.id, schema.credentialGroupShares.groupId))
           .where(eq(schema.credentialGroupShares.credentialId, id))
           .all();
+        /**
+         * 哪些键正被资产槽位实际取用：与运行期 pickSlotValue 同一规则（导出为 resolveSlotKey），
+         * 供编辑页在删除/改名键之前提示"删了这些槽位会取不到值"。
+         * 只看当前用户可见的绑定，避免共享查看者借提示探测他人私有资产的槽位构成。
+         */
+        const currentValues = canManage ? (deps.credentials?.valuesOf(c.id) ?? {}) : {};
+        const refByKey = new Map<string, Map<string, { serverId: string; name: string; slots: string[] }>>();
+        if (canManage) {
+          for (const b of shownBound) {
+            const key = resolveSlotKey(currentValues, b.slotName, b.credentialKey);
+            if (!key) continue;
+            const servers = refByKey.get(key) ?? new Map<string, { serverId: string; name: string; slots: string[] }>();
+            const cur = servers.get(b.serverId);
+            if (cur) {
+              if (!cur.slots.includes(b.slotName)) cur.slots.push(b.slotName);
+            } else {
+              servers.set(b.serverId, { serverId: b.serverId, name: b.name, slots: [b.slotName] });
+            }
+            refByKey.set(key, servers);
+          }
+        }
+        const referencedKeys = [...refByKey.entries()]
+          .map(([key, servers]) => ({ key, servers: [...servers.values()] }))
+          .sort((a, b) => a.key.localeCompare(b.key));
         return reply.send({
           code: 0,
           data: {
@@ -1503,6 +1597,8 @@ export function makeCredentialRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
             updatedAt: c.updatedAt, actualUsers,
             boundServers: [...byServer.values()],
             sharedGroups: shared.map((s) => ({ groupId: s.groupId, name: s.name ?? s.groupId.slice(0, 8) })),
+            /** 被槽位实际取用的键（key → 资产/槽位），编辑删除键时前端据此提示 */
+            referencedKeys,
           },
           message: 'ok',
         });
@@ -1542,7 +1638,18 @@ export function makeCredentialRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         if (row.ownerId !== p.userId && !p.isAdmin) return reply.code(403).send({ code: 403, data: null, message: 'Forbidden' });
         const body = req.body as { values?: Record<string, string>; name?: string; privileges?: string[] };
         const patch: Record<string, unknown> = {};
-        if (body.name !== undefined) patch.name = body.name;
+        if (body.name !== undefined) {
+          const name = typeof body.name === 'string' ? body.name.trim() : '';
+          if (!name) return reply.code(400).send({ code: 400, data: null, message: 'name 不能为空' });
+          if (name.length > 128) return reply.code(400).send({ code: 400, data: null, message: 'name 不能超过 128 字符' });
+          const dup = await db
+            .select({ id: schema.credentials.id })
+            .from(schema.credentials)
+            .where(and(eq(schema.credentials.name, name), ne(schema.credentials.id, id)))
+            .get();
+          if (dup) return reply.code(400).send({ code: 400, data: null, message: `凭证名 "${name}" 已存在` });
+          patch.name = name;
+        }
         if (body.privileges !== undefined) {
           // ADR-028：privileges 仅展示性元信息，限定枚举，不参与授权
           const allowed = ['root', 'rw', 'wo', 'ro'];
@@ -1552,7 +1659,10 @@ export function makeCredentialRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           patch.privileges = body.privileges;
         }
         if (body.values !== undefined) {
-          const valuesErr = validateCredentialValues(row.kind, body.values);
+          // 键集合整体替换（增/删/改名都走这里）。空集合显式失败：没有值的凭证运行期必然取不到值。
+          const cleaned = cleanValues(body.values);
+          if (!cleaned) return reply.code(400).send({ code: 400, data: null, message: '至少保留一个非空值' });
+          const valuesErr = validateCredentialValues(row.kind, cleaned);
           if (valuesErr) return reply.code(400).send({ code: 400, data: null, message: valuesErr });
           // §4.2 副作用：updated_at 变 → 所有绑定资产实例失效重建（先按旧 updatedAt 计算并失效旧键）
           const boundServers = await db
@@ -1563,7 +1673,8 @@ export function makeCredentialRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           for (const b of [...new Set(boundServers.map((x) => x.serverId))]) {
             for (const key of await serverInstanceKeys(db, b)) deps.pool?.invalidate(key);
           }
-          patch.encryptedValues = encryptCredential(deps.cryptoKey, id, JSON.stringify(body.values));
+          patch.encryptedValues = encryptCredential(deps.cryptoKey, id, JSON.stringify(cleaned));
+          patch.valueHint = hintOf(cleaned);
           patch.updatedAt = new Date();
           await governanceAudit(audit, p, 'credential_rotate', { credentialId: id, affectedServers: boundServers.length });
         }
@@ -1700,18 +1811,42 @@ export function makeGroupRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
       url: '/api/v1/groups',
       accessMode: 'admin',
       handler: async (req: FastifyRequest, reply: FastifyReply) => {
-        const body = req.body as { name?: string; description?: string };
+        const body = req.body as { name?: string; description?: string; serverIds?: unknown };
         if (!body.name) return reply.code(400).send({ code: 400, data: null, message: 'name 必填' });
-        const row = await db
-          .insert(schema.groups)
-          .values({ name: body.name, description: body.description ?? null })
-          .returning({ id: schema.groups.id, name: schema.groups.name })
-          .get();
+        // 建组即关联（用户 2026-11-20）：两个请求会留下"组已建、关联失败"的半成品，所以合并为一次事务。
+        const rawIds = Array.isArray(body.serverIds) ? body.serverIds : [];
+        const serverIds = [...new Set(rawIds.filter((x): x is string => typeof x === 'string' && x.length > 0))].slice(0, 500);
+
+        // 先校验全部 id 存在：有一个不存在就整体失败，不创建只有部分资产的组
+        if (serverIds.length > 0) {
+          const found = await db
+            .select({ id: schema.servers.id })
+            .from(schema.servers)
+            .where(inArray(schema.servers.id, serverIds))
+            .all();
+          const foundSet = new Set(found.map((r) => r.id));
+          const missing = serverIds.filter((id) => !foundSet.has(id));
+          if (missing.length > 0) {
+            return reply.code(400).send({ code: 400, data: null, message: `资产不存在：${missing.join('、')}` });
+          }
+        }
+
+        const row = db.transaction((tx) => {
+          const g = tx
+            .insert(schema.groups)
+            .values({ name: body.name!, description: body.description ?? null })
+            .returning({ id: schema.groups.id, name: schema.groups.name })
+            .get();
+          for (const sid of serverIds) {
+            tx.insert(schema.groupServers).values({ groupId: g.id, serverId: sid }).onConflictDoNothing().run();
+          }
+          return g;
+        });
         await audit.writeIntent({
           principal: req.principal!,
           asset: { id: 'groups', name: 'groups' },
           tool: 'system_setting',
-          args: { op: 'create_group', name: body.name },
+          args: { op: 'create_group', name: body.name, serverCount: serverIds.length },
           risk: 'normal',
           status: 'success',
           action: 'group_change',
