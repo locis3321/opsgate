@@ -9,6 +9,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { Client } from 'ssh2';
 import * as schema from '../db/schema.js';
 import type { CredentialService } from '../services/credentials.js';
+import { resolveSshCredential } from '../services/sshCredential.js';
 import { fingerprintOf, sshAuthParams } from '../native/connectors/ssh.js';
 import type { RouteDefinition } from './registry.js';
 
@@ -41,19 +42,17 @@ export async function trustFingerprintFor(
   const authSlot = hostConn.authSlot;
   if (!authSlot) return { status: 'skip', reason: '未配置 authSlot（认证槽位）' };
 
-  // 归属人自己绑的 personal 凭证也要能用（否则 trust 会报"槽位未绑定"）
-  const resolved = deps.credentials.resolveSlotValues(row.id, [authSlot], principal.userId);
-  if (resolved.length === 0) throw new Error('槽位未绑定凭证');
-  const cred = resolved[0]!;
-  // 加密私钥必须带上口令，否则 ssh2 报 "no passphrase given"。
-  // 与连接器同口径：先按口令槽位绑定的凭证取 passphrase 键，再回落密码键本身。
-  let passphrase: string | undefined;
-  const passSlot = hostConn.authPassSlot;
-  if (passSlot) {
-    passphrase = deps.credentials.slotCredentialKey(row.id, passSlot, 'passphrase', principal.userId)?.value;
-  }
-  passphrase ??= deps.credentials.credentialKey(cred.credentialId, 'passphrase') ?? undefined;
-  const credUsername = deps.credentials.slotCredentialKey(row.id, authSlot, 'username', principal.userId)?.value;
+  /**
+   * 认证参数一律走 resolveSshCredential，与连通测试/工具调用**同一份**解析逻辑。
+   *
+   * 此前这里自己拼了一遍：口令用 `slotCredentialKey(..., 'passphrase', ...)` 硬编码键名取值，
+   * 而 ADR-031 规定按"槽位名 + 归一化"匹配（凭证键实际叫 AUTH_PASS）。
+   * 结果是：在详情页把 AUTH_PASS 槽位绑好、authPassSlot 也设了，连通测试能过，
+   * 信任指纹却仍报 "Encrypted private OpenSSH key detected, but no passphrase given"。
+   */
+  const cred = resolveSshCredential(deps.credentials, row as never, principal.userId);
+  const credUsername = cred.username;
+  const passphrase = cred.passphrase;
 
   let capturedKey: Buffer | null = null;
   await new Promise<void>((resolve, reject) => {
@@ -64,7 +63,7 @@ export async function trustFingerprintFor(
     });
     c.once('error', (err) => reject(err));
     c.connect({
-      ...sshAuthParams(hostConn, { value: cred.value, username: credUsername ?? undefined }, passphrase),
+      ...sshAuthParams(hostConn, { value: cred.privateKey ?? cred.password ?? '', username: credUsername ?? undefined }, passphrase),
       readyTimeout: 10_000,
       hostVerifier: (key: Buffer, verify: (valid: boolean) => void) => {
         capturedKey = key;

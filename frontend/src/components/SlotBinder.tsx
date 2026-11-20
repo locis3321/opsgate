@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { X } from 'lucide-react';
 import { api, ApiError } from '../api';
-import SlotValueEditor, { slotMatches } from './SlotValueEditor';
+import SlotValueEditor from './SlotValueEditor';
 import Combobox from './Combobox';
 
 interface Binding {
@@ -58,19 +58,31 @@ export default function SlotBinder({ assetId, canShare = false, authSlot = null 
   const [showAdd, setShowAdd] = useState(false);
   const [addName, setAddName] = useState('');
   const [addTarget, setAddTarget] = useState('env');
+  /**
+   * 任何槽位/绑定变化都要同时刷新三处：
+   *  - slots：本表格自身
+   *  - candidates：候选的 boundSlots 变了
+   *  - asset：详情页的「私钥口令槽位」「主机」等区块读的是 asset.credentialSlots / asset.hostConn，
+   *    漏刷会让新增槽位在那些地方"看不见"，必须手动刷新整个页面才出现（用户反馈）。
+   */
+  const refreshAll = () => {
+    void qc.invalidateQueries({ queryKey: ['slots', assetId] });
+    void qc.invalidateQueries({ queryKey: ['candidates', assetId] });
+    void qc.invalidateQueries({ queryKey: ['asset', assetId] });
+  };
   /** 解绑确认：按 (槽位, 凭证) 定位到具体那条绑定 */
   const [confirming, setConfirming] = useState<{ slot: string; cred: string } | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const bind = useMutation({
     mutationFn: (v: { slotName: string; credentialId: string }) =>
       api(`/api/v1/servers/${assetId}/slots`, { method: 'POST', body: JSON.stringify(v) }),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['slots', assetId] }); void qc.invalidateQueries({ queryKey: ['candidates', assetId] }); setDraft({}); setErr(''); },
+    onSuccess: () => { refreshAll(); setDraft({}); setErr(''); },
     onError: (e) => setErr(e instanceof ApiError ? e.message : '绑定失败'),
   });
   const unbind = useMutation({
     mutationFn: (v: { slotName: string; credentialId: string }) =>
       api(`/api/v1/servers/${assetId}/slots/${encodeURIComponent(v.slotName)}?credentialId=${encodeURIComponent(v.credentialId)}`, { method: 'DELETE' }),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['slots', assetId] }); void qc.invalidateQueries({ queryKey: ['candidates', assetId] }); },
+    onSuccess: () => { refreshAll(); },
     onError: (e) => setErr(e instanceof ApiError ? e.message : '解绑失败'),
   });
   /** 切换共享范围（asset ⇄ personal）：不重选凭证，只改这条绑定的可见范围 */
@@ -80,7 +92,7 @@ export default function SlotBinder({ assetId, canShare = false, authSlot = null 
         method: 'PATCH',
         body: JSON.stringify({ shared: v.shared, credentialId: v.credentialId }),
       }),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['slots', assetId] }); setErr(''); },
+    onSuccess: () => { refreshAll(); setErr(''); },
     onError: (e) => setErr(e instanceof ApiError ? e.message : '切换共享失败'),
   });
   /** 改某条绑定的 SSH 登录用户名（空串 = 清除，回落凭证/资产上的用户名） */
@@ -90,7 +102,7 @@ export default function SlotBinder({ assetId, canShare = false, authSlot = null 
         method: 'PATCH',
         body: JSON.stringify({ username: v.username, credentialId: v.credentialId }),
       }),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['slots', assetId] }); setErr(''); },
+    onSuccess: () => { refreshAll(); setErr(''); },
     onError: (e) => setErr(e instanceof ApiError ? e.message : '保存用户名失败'),
   });
   /** 改某条绑定的凭证键（ADR-031）：空 = 回到"按槽位名匹配" */
@@ -100,7 +112,7 @@ export default function SlotBinder({ assetId, canShare = false, authSlot = null 
         method: 'PATCH',
         body: JSON.stringify({ credentialKey: v.credentialKey, credentialId: v.credentialId }),
       }),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['slots', assetId] }); setErr(''); },
+    onSuccess: () => { refreshAll(); setErr(''); },
     onError: (e) => setErr(e instanceof ApiError ? e.message : '保存键名失败'),
   });
   /** 正在编辑的用户名草稿：键 = slotName + credentialId */
@@ -108,7 +120,11 @@ export default function SlotBinder({ assetId, canShare = false, authSlot = null 
   const addSlot = useMutation({
     mutationFn: (v: { target: string; name: string; label: string; file: boolean }) =>
       api(`/api/v1/servers/${assetId}`, { method: 'PATCH', body: JSON.stringify({ credentialSlots: [...(slots.data ?? []).map((s) => ({ target: s.target, name: s.slotName, label: s.label, file: s.file })), v] }) }),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['slots', assetId] }); setShowAdd(false); setAddName(''); },
+    onSuccess: () => {
+      refreshAll();
+      setShowAdd(false);
+      setAddName('');
+    },
   });
   /** 直填值写入资产（ADR-027）：非凭证，不进凭证列表；空串视为清除 */
   const saveValue = useMutation({
@@ -118,7 +134,7 @@ export default function SlotBinder({ assetId, canShare = false, authSlot = null 
         ? api(url, { method: 'PUT', body: JSON.stringify({ value: v.value }) })
         : api(url, { method: 'DELETE' });
     },
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['slots', assetId] }); setDraft({}); setErr(''); },
+    onSuccess: () => { refreshAll(); setDraft({}); setErr(''); },
     onError: (e) => setErr(e instanceof ApiError ? e.message : '保存失败'),
   });
 
@@ -253,11 +269,13 @@ export default function SlotBinder({ assetId, canShare = false, authSlot = null 
                       <div style={{ color: 'var(--meta)', fontSize: 11 }}>已绑定凭证，直填值不可用（两者互斥）</div>
                     )}
 
-                    {/* 添加绑定：一槽可追加多条；候选只有自己创建的凭证（匹配规则与创建弹窗同源） */}
+                    {/* 添加绑定：一槽可追加多条；候选 = 自己的全部凭证（服务端已按归属过滤，非 owner 看不到他人凭证）。
+                        不做预过滤：匹配规则再细也挡不住"用户知道自己要绑哪个"，
+                        过滤反而会让本该可选的凭证消失。匹配项由面板排前并标注。 */}
                     <AddBindingButton
                       slotName={s.slotName}
                       isFile={s.file}
-                      candidates={(cands.data ?? []).filter((c) => slotMatches(c, s.slotName, s.file))}
+                      candidates={cands.data ?? []}
                       onPick={(credentialId) => bind.mutate({ slotName: s.slotName, credentialId })}
                     />
                   </div>

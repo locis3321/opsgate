@@ -62,13 +62,14 @@ interface PanelAnchor { top: number; left: number; width: number }
  * 早期各写一份，导致「能不能滚动 / 能不能搜索」的修复必须做两遍且容易漂移。
  */
 function CredentialPickerPanel({
-  anchor, panelRef, options, totalCount, slotName, onPick, onClose,
+  anchor, panelRef, options, matchedIds, slotName, onPick, onClose,
 }: {
   anchor: PanelAnchor;
   panelRef: React.RefObject<HTMLDivElement | null>;
+  /** 全部候选（服务端已按归属过滤：仅本人凭证，admin 见全部） */
   options: CredCandidate[];
-  /** 未过滤前的候选总数（空态文案要说清"是没匹配"还是"根本没有"） */
-  totalCount: number;
+  /** 与槽位匹配的候选 id 集合（仅用于排序与标注，不用于过滤） */
+  matchedIds: Set<string>;
   slotName: string;
   onPick: (credentialId: string) => void;
   onClose: () => void;
@@ -77,13 +78,23 @@ function CredentialPickerPanel({
   const [active, setActive] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
 
+  /**
+   * 候选全给、只按搜索词过滤，匹配项排在前面并打标。
+   *
+   * 为什么不按匹配规则过滤：规则再细也挡不住"用户知道自己要绑哪个"，
+   * 过滤只会让本该可选的凭证消失（如 MySQL 的 host 槽位，规则会把它认为"不匹配"的凭证全藏起来）。
+   * 排序+标注既保留了提示，又不夺走用户的选择权。
+   */
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return options;
-    return options.filter(
-      (c) => c.name.toLowerCase().includes(q) || c.valueHint.toLowerCase().includes(q) || c.kind.toLowerCase().includes(q),
-    );
-  }, [options, query]);
+    const byQuery = q
+      ? options.filter((c) => c.name.toLowerCase().includes(q) || c.valueHint.toLowerCase().includes(q) || c.kind.toLowerCase().includes(q))
+      : options;
+    // 匹配项在前，同组内保持原序（服务端按名称排序）
+    const matched = byQuery.filter((c) => matchedIds.has(c.id));
+    const rest = byQuery.filter((c) => !matchedIds.has(c.id));
+    return [...matched, ...rest];
+  }, [options, query, matchedIds]);
 
   useEffect(() => { searchRef.current?.focus(); }, []);
   // 过滤结果变化后，高亮项可能越界
@@ -126,37 +137,44 @@ function CredentialPickerPanel({
       <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
         {filtered.length === 0 ? (
           <div style={{ padding: '10px', color: 'var(--meta)', fontSize: 12, lineHeight: 1.7 }}>
-            {totalCount === 0 ? (
+            {options.length === 0 ? (
               <>
-                <div style={{ fontWeight: 600, color: 'var(--fg-2)', marginBottom: 4 }}>没有可绑定的凭证</div>
-                <div>匹配规则：凭证需含键 <code className="mono">{slotName}</code>（或该凭证只有一个键时自动匹配）。</div>
-                <div>候选中 <b>{totalCount}</b> 个凭证都未命中；共享凭证只能使用、不能绑定。</div>
-                <a href="#/credentials" style={{ display: 'inline-block', marginTop: 6 }}>去创建含该键的凭证 →</a>
+                <div style={{ fontWeight: 600, color: 'var(--fg-2)', marginBottom: 4 }}>还没有可用凭证</div>
+                <div>绑定候选只含你自己创建的凭证（共享凭证只能使用、不能绑定）。</div>
+                <a href="#/credentials" style={{ display: 'inline-block', marginTop: 6 }}>去创建凭证 →</a>
               </>
             ) : (
-              <div>没有匹配「<b>{query.trim()}</b>」的凭证（共 {totalCount} 个可选）</div>
+              <div>没有匹配「<b>{query.trim()}</b>」的凭证（共 {options.length} 个可选）</div>
             )}
           </div>
         ) : (
-          filtered.map((c, i) => (
-            <button
-              key={c.id}
-              type="button"
-              style={{
-                display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer',
-                // 高亮用 background：纯键盘操作时用户要能看见当前选中项
-                background: i === active ? 'var(--accent-soft)' : 'transparent',
-                border: 'none', borderBottom: '1px solid var(--border-soft)',
-                padding: '8px 10px', color: 'var(--fg)', fontSize: 'var(--text-sm)',
-              }}
-              onMouseEnter={() => setActive(i)}
-              onClick={() => commit(c)}
-            >
-              <span className="mono">{c.name}</span>
-              <span style={{ color: 'var(--meta)', marginLeft: 8 }}>{c.valueHint}</span>
-              <span style={{ color: 'var(--meta)', marginLeft: 8, fontSize: 11 }}>{c.kind}</span>
-            </button>
-          ))
+          filtered.map((c, i) => {
+            const matched = matchedIds.has(c.id);
+            return (
+              <button
+                key={c.id}
+                type="button"
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left', cursor: 'pointer',
+                  // 高亮用 background：纯键盘操作时用户要能看见当前选中项
+                  background: i === active ? 'var(--accent-soft)' : 'transparent',
+                  border: 'none', borderBottom: '1px solid var(--border-soft)',
+                  padding: '8px 10px', color: 'var(--fg)', fontSize: 'var(--text-sm)',
+                }}
+                onMouseEnter={() => setActive(i)}
+                onClick={() => commit(c)}
+              >
+                <span className="mono">{c.name}</span>
+                <span style={{ color: 'var(--meta)', marginLeft: 8 }}>{c.valueHint}</span>
+                <span style={{ color: 'var(--meta)', marginLeft: 8, fontSize: 11 }}>{c.kind}</span>
+                {matched && (
+                  <span style={{ color: 'var(--accent)', marginLeft: 8, fontSize: 11 }} title={`含键 ${slotName}，绑定后无需改键`}>
+                    匹配 {slotName}
+                  </span>
+                )}
+              </button>
+            );
+          })
         )}
       </div>
     </div>,
@@ -191,8 +209,7 @@ export default function SlotValueEditor({
   const [anchor, setAnchor] = useState<PanelAnchor | null>(null);
   const rowRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const options = candidates.filter((c) => slotMatches(c, slotName, isFile));
-
+  const matchCandidates = candidates.filter((c) => slotMatches(c, slotName, isFile));
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
@@ -248,8 +265,8 @@ export default function SlotValueEditor({
           <CredentialPickerPanel
             anchor={anchor}
             panelRef={panelRef}
-            options={options}
-            totalCount={candidates.length}
+            options={candidates}
+            matchedIds={new Set(matchCandidates.map((c) => c.id))}
             slotName={slotName}
             onPick={onPick}
             onClose={() => setOpen(false)}
@@ -306,8 +323,8 @@ export default function SlotValueEditor({
         <CredentialPickerPanel
           anchor={anchor}
           panelRef={panelRef}
-          options={options}
-          totalCount={candidates.length}
+          options={candidates}
+          matchedIds={new Set(matchCandidates.map((c) => c.id))}
           slotName={slotName}
           onPick={onPick}
           onClose={() => setOpen(false)}

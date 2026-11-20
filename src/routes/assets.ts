@@ -786,7 +786,7 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         const row = await db.select().from(schema.servers).where(eq(schema.servers.id, id)).get();
         if (!row) return reply.code(404).send({ code: 404, data: null, message: '资产不存在' });
         if (row.ownerId !== p.userId && !p.isAdmin) return reply.code(403).send({ code: 403, data: null, message: 'Forbidden' });
-        const body = req.body as { visibility?: string; sharedWithUserIds?: string[]; displayName?: string; description?: string; tags?: unknown; allowPrivateNetwork?: boolean; allowInsecureTls?: boolean; credentialSlots?: Array<{ target: string; name: string; label: string; file: boolean }>; url?: string; enabled?: boolean };
+        const body = req.body as { visibility?: string; sharedWithUserIds?: string[]; displayName?: string; description?: string; tags?: unknown; allowPrivateNetwork?: boolean; allowInsecureTls?: boolean; credentialSlots?: Array<{ target: string; name: string; label: string; file: boolean }>; url?: string; enabled?: boolean; hostConn?: { authPassSlot?: string | null } };
         const patch: Record<string, unknown> = {};
         if (body.displayName !== undefined) patch.displayName = body.displayName;
         if (body.description !== undefined) patch.description = body.description;
@@ -822,6 +822,46 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
             return reply.code(400).send({ code: 400, data: null, message: '凭证槽位数超过上限（credentials.max_slots）' });
           }
           patch.credentialSlots = body.credentialSlots;
+          // 槽位声明变化必须回收实例：实例键只含「已绑定的槽位」（buildInstanceKey），
+          // 不含声明列表——不回收的话，补了槽位并绑上值，已在运行的实例仍是旧计划，读不到新槽位。
+          for (const key of await serverInstanceKeys(db, id)) deps.pool?.invalidate(key);
+        }
+        /**
+         * 私钥口令槽位（authPassSlot）可在创建后补写。
+         *
+         * 为什么需要：该字段此前只在创建弹窗写入，PATCH 不接受 hostConn，导致——
+         * 建资产时选了"密码"方式、事后改用加密私钥的资产**永远**补不上口令槽位，
+         * 信任指纹与连通测试一律报 "Encrypted private OpenSSH key detected, but no passphrase given"，
+         * 即便在详情页把 AUTH_PASS 槽位绑好了也没用（解析只看 hostConn.authPassSlot）。
+         *
+         * 白名单只开放 authPassSlot：host/port/username 等连接参数一旦可改就会绕过创建期的
+         * 校验与审计，也等于让普通成员能把资产指向别的主机。这里不做整体替换，只做单字段合并。
+         */
+        if (body.hostConn !== undefined) {
+          if (row.executionMode !== 'native' || !row.hostConn) {
+            return reply.code(400).send({ code: 400, data: null, message: '仅原生 SSH 主机支持配置口令槽位' });
+          }
+          const cur = row.hostConn as Record<string, unknown>;
+          const slot = body.hostConn?.authPassSlot;
+          const next: Record<string, unknown> = { ...cur };
+          if (slot === null || slot === '') {
+            delete next.authPassSlot;
+          } else if (slot !== undefined) {
+            if (typeof slot !== 'string') {
+              return reply.code(400).send({ code: 400, data: null, message: 'authPassSlot 必须为字符串或 null' });
+            }
+            const declared = ((row.credentialSlots ?? []) as Array<{ name?: string }>).map((s) => s.name);
+            if (!declared.includes(slot)) {
+              return reply.code(400).send({ code: 400, data: null, message: `资产未声明槽位 "${slot}"，请先在「凭证绑定」中补槽位` });
+            }
+            next.authPassSlot = slot;
+          }
+          if (JSON.stringify(next) !== JSON.stringify(cur)) {
+            patch.hostConn = next;
+            await governanceAudit(audit, p, 'asset_update', {
+              serverId: id, field: 'authPassSlot', from: cur.authPassSlot ?? null, to: next.authPassSlot ?? null,
+            });
+          }
         }
         if (body.allowPrivateNetwork !== undefined) {
           patch.allowPrivateNetwork = body.allowPrivateNetwork;
@@ -868,6 +908,11 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
             for (const key of await serverInstanceKeys(db, id)) deps.pool?.invalidate(key);
           }
           await governanceAudit(audit, p, 'asset_enabled_change', { serverId: id, enabled: patch.enabled });
+        }
+        // 空 patch：请求里的字段全部未生效（例如 hostConn 只传了不允许改的键）→ 显式 400，
+        // 不交给 drizzle 抛 "No values to set"（那是 500，看起来像服务端故障）
+        if (Object.keys(patch).length === 0) {
+          return reply.code(400).send({ code: 400, data: null, message: '没有可更新的字段' });
         }
         await db.update(schema.servers).set(patch as never).where(eq(schema.servers.id, id)).run();
         return reply.send({ code: 0, data: { id }, message: 'ok' });

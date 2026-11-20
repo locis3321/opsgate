@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import * as schema from './db/schema.js';
 import { encryptCredential, loadCredentialKey } from './services/crypto.js';
 import { CredentialService } from './services/credentials.js';
@@ -35,6 +35,7 @@ const KEY_HEAD = '-----BEGIN OPENSSH PRIVATE KEY-----';
 
 let sqlite: Database.Database;
 let credentials: CredentialService;
+let TEST_KEY: Buffer;
 
 function assetView(): AssetView {
   return {
@@ -67,6 +68,7 @@ beforeAll(async () => {
   migrate(db, { migrationsFolder: MIGRATIONS });
 
   const key = loadCredentialKey(path.join(dir, 'credentials.key'));
+  TEST_KEY = key;
   credentials = new CredentialService(sqlite, key);
 
   sqlite
@@ -148,6 +150,42 @@ describe('SSH 口令槽位解析', () => {
     sqlite
       .prepare("UPDATE server_credentials SET credential_key = 'passphrase' WHERE slot_name = 'AUTH_PASS'")
       .run();
+  });
+});
+
+/**
+ * 真实用户场景（2026-11-20 用户报告 tke-elk-kibana-01-16-227-host-16-227）：
+ * 凭证键名就是 AUTH_PASS（不是 'passphrase'），绑定上 credential_key 也写成 AUTH_PASS。
+ * 此时按槽位名精确命中即应取到口令。
+ *
+ * 信任指纹端点此前用 slotCredentialKey(id, slot, 'passphrase') 硬编码键名，
+ * 在这组数据下取不到值，于是"连通测试通过、信任指纹报 no passphrase"。
+ */
+describe('凭证键名就是 AUTH_PASS 时（未经改名）', () => {
+  beforeEach(() => {
+    // 换成真实用户的凭证形态：键名就是 AUTH_PASS，不叫 passphrase
+    sqlite
+      .prepare('UPDATE credentials SET encrypted_values = ? WHERE id = ?')
+      .run(
+        encryptCredential(TEST_KEY, CRED, JSON.stringify({
+          AUTH: `${KEY_HEAD}\nOWNER\n-----END OPENSSH PRIVATE KEY-----`,
+          username: 'superuser',
+          AUTH_PASS: PASSPHRASE,
+        })),
+        CRED,
+      );
+    sqlite.prepare("UPDATE server_credentials SET credential_key = 'AUTH_PASS' WHERE slot_name = 'AUTH_PASS'").run();
+  });
+
+  it('resolveSshCredential 取到口令', () => {
+    const cred = resolveSshCredential(credentials, assetView(), OWNER);
+    expect(cred.passphrase).toBe(PASSPHRASE);
+  });
+
+  it('slotCredentialKey 用硬编码 passphrase 取不到（旧实现的缺陷点）', () => {
+    expect(credentials.slotCredentialKey(ASSET_ID, 'AUTH_PASS', 'passphrase', OWNER)).toBeNull();
+    // 正确口径：按绑定指定的键名取
+    expect(credentials.slotCredentialKey(ASSET_ID, 'AUTH_PASS', 'AUTH_PASS', OWNER)?.value).toBe(PASSPHRASE);
   });
 });
 

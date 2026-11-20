@@ -286,9 +286,24 @@ export default function AssetDetail() {
       <Tabs tabs={TABS} value={tab} onChange={setTab} />
 
       {tab === 'credentials' && (
-        <div className="card" style={{ padding: 20 }}>
-          <SlotBinder assetId={id!} canShare={canShare} authSlot={isSshNative ? String((asset.data?.hostConn as Record<string, unknown> | null | undefined)?.authSlot ?? '') || null : null} />
-        </div>
+        <>
+          <div className="card" style={{ padding: 20 }}>
+            <SlotBinder assetId={id!} canShare={canShare} authSlot={isSshNative ? String((asset.data?.hostConn as Record<string, unknown> | null | undefined)?.authSlot ?? '') || null : null} />
+          </div>
+          {isSshNative && (
+            <PrivateKeyPassphraseSlot
+              assetId={id!}
+              passwordSlots={(a.credentialSlots as Array<{ name: string; label?: string }> | null ?? [])
+                .map((s) => s.name)
+                .filter((n) => n !== String((a.hostConn as Record<string, unknown> | null)?.authSlot ?? ''))}
+              current={(a.hostConn as Record<string, unknown> | null)?.authPassSlot as string | undefined}
+              onSaved={() => {
+                void qc.invalidateQueries({ queryKey: ['asset', id] });
+                void qc.invalidateQueries({ queryKey: ['assets'] });
+              }}
+            />
+          )}
+        </>
       )}
 
       {tab === 'tools' && (
@@ -527,8 +542,71 @@ export default function AssetDetail() {
 }
 
 /** 调用与审计：统计来自现有 /audit/stats，明细直达 /audit?serverId= */
-function StatsTab({ assetId, name, nav }: { assetId: string; name: string; nav: ReturnType<typeof useNavigate> }) {
-  const [statWindow, setStatWindow] = useState<'24h' | '7d' | '30d'>('7d');
+/**
+ * 私钥口令槽位（authPassSlot）配置。
+ *
+ * 为什么单独一个卡片：加密 OpenSSH 私钥必须提供 passphrase，否则 ssh2 直接报
+ * "Encrypted private OpenSSH key detected, but no passphrase given"。
+ * 口令槽位只在此处选择，互不干扰。
+ */
+function PrivateKeyPassphraseSlot({
+  assetId, passwordSlots, current, onSaved,
+}: {
+  assetId: string;
+  /** 除 authSlot 外的已声明槽位（候选口令槽位） */
+  passwordSlots: string[];
+  current: string | undefined;
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const save = useMutation({
+    mutationFn: (slot: string | null) =>
+      api(`/api/v1/servers/${assetId}`, { method: 'PATCH', body: JSON.stringify({ hostConn: { authPassSlot: slot } }) }),
+    onSuccess: (_d, slot) => {
+      toast.success(slot ? `口令槽位已设为 ${slot}` : '已清除口令槽位');
+      onSaved();
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : '保存失败'),
+  });
+
+  return (
+    <div className="card" style={{ padding: 20, display: 'grid', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <KeyRound size={15} strokeWidth={1.8} style={{ color: 'var(--accent)' }} />
+        <span style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>私钥口令槽位</span>
+        {current
+          ? <StatusBadge kind="success" label={current} />
+          : <StatusBadge kind="warn" label="未设置" />}
+      </div>
+      <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)', lineHeight: 1.7 }}>
+        加密的 OpenSSH 私钥需要口令才能使用。先在上方给某个槽位绑定口令凭证，再到此处指定它是口令槽位；
+        未设置时连接会报 <span className="mono">Encrypted private OpenSSH key detected, but no passphrase given</span>。
+      </div>
+      {passwordSlots.length === 0 ? (
+        <div style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>
+          该资产只有认证槽位，没有可用作口令的槽位。请先在上方「补槽位」新增一个（如 AUTH_PASS）并绑定口令凭证。
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 200 }}>
+            <Combobox
+              ariaLabel="口令槽位"
+              value={current ?? ''}
+              onChange={(v) => save.mutate(v || null)}
+              placeholder="未设置口令槽位"
+              options={[{ value: '', label: '未设置' }, ...passwordSlots.map((s) => ({ value: s, label: s }))]}
+            />
+          </div>
+          {current && (
+            <button className="btn" onClick={() => save.mutate(null)} disabled={save.isPending}>清除</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatsTab({ assetId, name, nav }: { assetId: string; name: string; nav: ReturnType<typeof useNavigate> }) {  const [statWindow, setStatWindow] = useState<'24h' | '7d' | '30d'>('7d');
   const stats = useQuery({
     queryKey: ['asset-stats', assetId, statWindow],
     queryFn: () => api<{ rows: Array<Record<string, unknown>> }>(`/api/v1/audit/stats?groupBy=asset&window=${statWindow}&assetId=${assetId}`),
