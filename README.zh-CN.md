@@ -333,7 +333,7 @@ frontend/
 └── src/pages/              18 个控制台页面
 ```
 
-**关键技术决策**（完整记录见 `docs/adr-*.md`）
+**关键技术决策**（完整记录含 ADR-001 至 ADR-034，见 `docs/opsgate-spec-v1.md` §10）
 
 | 决策 | 内容 |
 |---|---|
@@ -419,11 +419,8 @@ pnpm run seed                # 写入种子数据（内置规则、Market 目录
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | 设计权威：数据模型、工具暴露、安全约束、API、验收标准 |
-| [`docs/project-rules.md`](docs/project-rules.md) | 编码硬约束与不可协商红线 |
-| [`docs/project-facts.md`](docs/project-facts.md) | 关键常量、错误码、构建命令 |
+| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | 设计权威：数据模型、工具暴露、安全约束、API、验收标准，以及 ADR-001 至 ADR-034 全部架构决策记录（§10） |
 | [`docs/deploy.md`](docs/deploy.md) | 部署、备份、迁移、已知限制 |
-| [`docs/adr-028.md`](docs/adr-028.md) ~ [`adr-033.md`](docs/adr-033.md) | 架构决策记录（ADR-034 同槽位多凭证的确定性择优见 Spec §10） |
 
 ---
 

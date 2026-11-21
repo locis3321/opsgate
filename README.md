@@ -334,7 +334,7 @@ frontend/
 └── src/pages/              18 admin console pages
 ```
 
-**Key technical decisions** (full records in `docs/adr-*.md`)
+**Key technical decisions** (full records, including ADR-001 to ADR-034, are in `docs/opsgate-spec-v1.md` §10)
 
 | Decision | Content |
 |---|---|
@@ -420,11 +420,8 @@ pnpm run seed                # write seed data (built-in rules, Market catalog)
 
 | Document | Contents |
 |---|---|
-| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | Authoritative design: data model, tool exposure, security constraints, API, acceptance criteria |
-| [`docs/project-rules.md`](docs/project-rules.md) | Hard coding constraints and non-negotiable red lines |
-| [`docs/project-facts.md`](docs/project-facts.md) | Key constants, error codes, build commands |
+| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | Authoritative design: data model, tool exposure, security constraints, API, acceptance criteria, and all architecture decision records (ADR-001 to ADR-034) in §10 |
 | [`docs/deploy.md`](docs/deploy.md) | Deployment, backup, migration, known limitations |
-| [`docs/adr-028.md`](docs/adr-028.md) ~ [`adr-033.md`](docs/adr-033.md) | Architecture decision records (the deterministic selection among multiple credentials per slot, ADR-034, is in Spec §10) |
 
 > The documents above are written in Chinese.
 
