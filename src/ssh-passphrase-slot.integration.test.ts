@@ -149,9 +149,10 @@ describe('authPassSlot：创建后可补写，且解析能取到口令', { timeo
     expect(resolveSshCredential(credentials, row as never, aliceId).passphrase).toBeUndefined();
   });
 
-  it('PATCH hostConn 是受限白名单：host/port/username 等连接参数不可经此修改', async () => {
+  it('hostConn 可整体提交：authPassSlot 与连接参数一起改（2026-11-20 起全部开放）', async () => {
     const { serverId } = await makeEncryptedKeyHost('host-enc-3');
-    // 只允许改 authPassSlot；其它字段即使传了也不生效（防止绕过创建期的校验与审计）
+    // 此前这里断言 host/port/username 不可改；用户 2026-11-20 要求「全部开放」后行为已变更，
+    // 详见 src/asset-edit.integration.test.ts（连接参数修改的完整用例，含清指纹语义）。
     const r = await api('PATCH', `/api/v1/servers/${serverId}`, {
       hostConn: { authPassSlot: 'AUTH_PASS', host: '1.2.3.4', port: 22, username: 'root' },
     });
@@ -159,9 +160,11 @@ describe('authPassSlot：创建后可补写，且解析能取到口令', { timeo
     const row = await db.select().from(schema.servers).where(eq(schema.servers.id, serverId)).get();
     const hc = row!.hostConn as Record<string, unknown>;
     expect(hc.authPassSlot).toBe('AUTH_PASS');
-    expect(hc.host).toBe('10.0.0.9');
-    expect(hc.port).toBe(22322);
-    expect(hc.username).toBe('superuser');
+    expect(hc.host).toBe('1.2.3.4');
+    expect(hc.port).toBe(22);
+    expect(hc.username).toBe('root');
+    // 目标变了 → 旧指纹必须清掉
+    expect(hc.hostFingerprint).toBeUndefined();
   });
 
   it('非 native host 资产 → 400（口令槽位只对 SSH 主机有意义）', async () => {

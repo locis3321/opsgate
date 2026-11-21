@@ -3,15 +3,15 @@ import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowLeft, Fingerprint, Zap, Wrench, BarChart3, ScrollText,
-  KeyRound, RefreshCw, Eye, Users2, ExternalLink, Trash2,
+  KeyRound, RefreshCw, Eye, Users2, ExternalLink, Trash2, Pencil,
 } from 'lucide-react';
 import { api, ApiError, fmtTs } from '../api';
 import SlotBinder from '../components/SlotBinder';
+import AssetEditModal, { type EditableAsset } from '../components/AssetEditModal';
 import StatusBadge from '../components/StatusBadge';
 import Tabs from '../components/Tabs';
 import { useToast } from '../components/Toast';
 import Combobox from '../components/Combobox';
-import TagEditor from '../components/TagEditor';
 
 interface SlotRow { slotName: string; label: string; target: string; file: boolean; optional?: boolean; credentialId: string | null; credentialName: string | null; inlineValue: string | null; hasInline?: boolean }
 interface ToolRow { name: string; description: string }
@@ -45,10 +45,8 @@ export default function AssetDetail() {
   const [tab, setTab] = useState<TabKey>('credentials');
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  /** 连接地址编辑草稿（null = 未编辑，显示服务端值） */
-  const [urlDraft, setUrlDraft] = useState<string | null>(null);
-  const [allowPrivateDraft, setAllowPrivateDraft] = useState<boolean | null>(null);
   const [insecureTlsDraft, setInsecureTlsDraft] = useState<boolean | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
 
   const asset = useQuery({ queryKey: ['asset', id], queryFn: () => api<Record<string, unknown>>(`/api/v1/servers/${id}`) });
   // 与 SlotBinder 共用 ['slots', id] 缓存：绑定/解绑后此条同步刷新
@@ -132,36 +130,10 @@ export default function AssetDetail() {
     onError: (e) => toast.error(e instanceof ApiError ? e.message : '信任失败'),
   });
 
-  const del = useMutation({
-    mutationFn: () => api(`/api/v1/servers/${id}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ['assets'] });
-      toast.success('资产已删除');
-      nav('/assets');
-    },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : '删除失败'),
-  });
-
-  /** 改连接地址（后端会做 SSRF 校验；同批可同时开私网，见 PATCH 的最终值判定） */
-  const patchUrl = useMutation({
-    mutationFn: (v: { url: string }) =>
-      api(`/api/v1/servers/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          url: v.url.trim(),
-          ...(allowPrivateDraft !== null ? { allowPrivateNetwork: allowPrivateDraft } : {}),
-        }),
-      }),
-    onSuccess: () => {
-      setUrlDraft(null);
-      toast.success('连接地址已保存');
-      void qc.invalidateQueries({ queryKey: ['asset', id] });
-      void qc.invalidateQueries({ queryKey: ['assets'] });
-    },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : '保存失败'),
-  });
-
-  /** 允许不安全 TLS（自签证书）：关闭证书校验，变更写治理审计并回收实例 */
+  /**
+   * 允许不安全 TLS（自签证书）：纯安全策略，不进编辑弹窗——编辑弹窗只管
+   * 「基础信息 + 连接目标」，安全开关仍在可见性页单独控制；变更写治理审计并回收实例。
+   */
   const patchInsecureTls = useMutation({
     mutationFn: (v: { allowInsecureTls: boolean }) =>
       api(`/api/v1/servers/${id}`, { method: 'PATCH', body: JSON.stringify(v) }),
@@ -176,32 +148,14 @@ export default function AssetDetail() {
     },
   });
 
-  const patchPrivate = useMutation({
-    mutationFn: (v: { allowPrivateNetwork: boolean }) =>
-      api(`/api/v1/servers/${id}`, { method: 'PATCH', body: JSON.stringify(v) }),
+  const del = useMutation({
+    mutationFn: () => api(`/api/v1/servers/${id}`, { method: 'DELETE' }),
     onSuccess: () => {
-      toast.success('私网访问设置已保存');
-      void qc.invalidateQueries({ queryKey: ['asset', id] });
-    },
-    onError: (e) => {
-      setAllowPrivateDraft(null);
-      toast.error(e instanceof ApiError ? e.message : '保存失败');
-    },
-  });
-
-  /**
-   * 标签保存（整体替换）。标签影响 `?tag=` 收窄与分组筛选，所以每次增删都立刻落库，
-   * 不做"批量编辑后统一保存"——否则用户以为改完了、实际没生效。
-   */
-  const patchTags = useMutation({
-    mutationFn: (tags: string[]) =>
-      api(`/api/v1/servers/${id}`, { method: 'PATCH', body: JSON.stringify({ tags }) }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ['asset', id] });
       void qc.invalidateQueries({ queryKey: ['assets'] });
-      void qc.invalidateQueries({ queryKey: ['server-tags'] });
+      toast.success('资产已删除');
+      nav('/assets');
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : '标签保存失败'),
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : '删除失败'),
   });
 
   const a = asset.data;
@@ -264,6 +218,9 @@ export default function AssetDetail() {
           </p>
         </div>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn" onClick={() => setEditOpen(true)} style={{ gap: 6 }} title="编辑基础信息、连接参数与执行配置">
+            <Pencil size={14} strokeWidth={1.8} /> 编辑
+          </button>
           {isSshNative && (
             <button className="btn" onClick={() => trust.mutate()} disabled={trust.isPending} style={{ gap: 6 }} title="采集主机公钥并记录 SHA256 指纹；之后连接时指纹不一致将被拒绝（防中间人）">
               <Fingerprint size={14} strokeWidth={1.8} /> 信任主机指纹
@@ -429,62 +386,26 @@ export default function AssetDetail() {
             <Row k="协议" v={String(a.type)} mono />
             <Row k="品类" v={String(a.category)} />
             <Row k="执行模式" v={String(a.executionMode)} />
+            <Row k="主机" v={a.hostConn ? `${(a.hostConn as Record<string, unknown>).host}:${(a.hostConn as Record<string, unknown>).port ?? 22}` : '无'} />
+            {!isSshNative && String(a.type) !== 'stdio' && <Row k="连接地址" v={String(a.url ?? '无')} mono />}
+            {!isSshNative && <Row k="允许私网访问" v={a.allowPrivateNetwork ? '是' : '否'} />}
             <div style={{ display: 'grid', gap: 6, borderTop: '1px solid var(--border-soft)', paddingTop: 10 }}>
               <div style={{ color: 'var(--meta)', fontSize: 'var(--text-sm)' }}>标签</div>
-              <TagEditor
-                inputId="asset-tags-input"
-                value={(a.tags as string[] | null) ?? []}
-                onChange={(tags) => patchTags.mutate(tags)}
-              />
-              <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)' }}>
-                标签用于 MCP 端点 <span className="mono">?tag=</span> 收窄与资产筛选，按精确值匹配；优先从已有标签中选，避免近义重复。
-              </div>
+              {(a.tags as string[] | null)?.length ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {(a.tags as string[]).map((t) => <span key={t} className="tag">{t}</span>)}
+                </div>
+              ) : (
+                <span style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)' }}>未设置标签</span>
+              )}
             </div>
-            <Row k="主机" v={a.hostConn ? `${(a.hostConn as Record<string, unknown>).host}:${(a.hostConn as Record<string, unknown>).port ?? 22}` : '无'} />
             <Row k="配置哈希" v={String(a.configHash).slice(0, 12)} mono />
             <Row k="创建" v={fmtTs(a.createdAt as number)} />
           </div>
 
-          {/* 连接地址：可编辑（建错地址、或条目升级后要指向真实地址时不必删了重建）。
-              SSH 主机用 host_conn（另有"主机"行），stdio 资产无地址——只有 HTTP 类才显示。 */}
-          {!isSshNative && String(a.type) !== 'stdio' ? (
-            <div style={{ borderTop: '1px solid var(--border-soft)', paddingTop: 12, display: 'grid', gap: 8 }}>
-              <span style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)', fontWeight: 500 }}>连接地址</span>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                <input
-                  className="input mono"
-                  style={{ flex: 1, minWidth: 260 }}
-                  placeholder="http://host:port（留空表示 stdio 型资产不需要地址）"
-                  value={urlDraft ?? String(a.url ?? '')}
-                  onChange={(e) => setUrlDraft(e.target.value)}
-                />
-                <button
-                  className="btn btn-primary"
-                  disabled={patchUrl.isPending || (urlDraft ?? String(a.url ?? '')) === String(a.url ?? '')}
-                  onClick={() => patchUrl.mutate({ url: urlDraft ?? String(a.url ?? '') })}
-                >
-                  {patchUrl.isPending ? '保存中…' : '保存地址'}
-                </button>
-              </div>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
-                <input
-                  type="checkbox"
-                  checked={allowPrivateDraft ?? Boolean(a.allowPrivateNetwork)}
-                  onChange={(e) => {
-                    setAllowPrivateDraft(e.target.checked);
-                    patchPrivate.mutate({ allowPrivateNetwork: e.target.checked });
-                  }}
-                />
-                允许私网访问（内网地址必须开启；变更写治理审计）
-              </label>
-              <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)' }}>
-                地址变更会立即回收该资产的运行实例，下次调用按新地址重建。
-              </div>
-            </div>
-          ) : null}
-
-          {/* TLS 校验开关：独立于"连接地址"——stdio 型资产（如 kubernetes-mcp-server）同样需要
-              （它自己连集群 API），只是没有可编辑的 url。SSH 主机不适用（ssh2 走主机指纹）。 */}
+          {/* TLS 校验开关：纯安全策略，与「编辑」里的连接目标分开。
+              stdio 型资产（如 kubernetes-mcp-server）同样需要（它自己连集群 API）；
+              SSH 主机不适用（ssh2 走主机指纹）。 */}
           {!isSshNative && (
             <div style={{ borderTop: '1px solid var(--border-soft)', paddingTop: 12, display: 'grid', gap: 6 }}>
               <span style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)', fontWeight: 500 }}>TLS 校验</span>
@@ -507,6 +428,11 @@ export default function AssetDetail() {
               </div>
             </div>
           )}
+
+          <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)', lineHeight: 1.7 }}>
+            名称、显示名、说明、标签、连接目标统一在顶部「编辑」中修改。
+            品类 / 执行模式 / 协议与启动配置建错后不可改，需重建资产。
+          </div>
 
           {/* 删除资产：先列影响清单（凭证绑定条数 + 分组归属），确认后才执行 */}
           <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
@@ -537,6 +463,13 @@ export default function AssetDetail() {
       )}
 
       {tab === 'stats' && <StatsTab assetId={id!} name={String(a.name)} nav={nav} />}
+      {editOpen && a && (
+        <AssetEditModal
+          asset={a as unknown as EditableAsset}
+          onClose={() => setEditOpen(false)}
+          onSaved={() => setEditOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -786,7 +786,31 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         const row = await db.select().from(schema.servers).where(eq(schema.servers.id, id)).get();
         if (!row) return reply.code(404).send({ code: 404, data: null, message: '资产不存在' });
         if (row.ownerId !== p.userId && !p.isAdmin) return reply.code(403).send({ code: 403, data: null, message: 'Forbidden' });
-        const body = req.body as { visibility?: string; sharedWithUserIds?: string[]; displayName?: string; description?: string; tags?: unknown; allowPrivateNetwork?: boolean; allowInsecureTls?: boolean; credentialSlots?: Array<{ target: string; name: string; label: string; file: boolean }>; url?: string; enabled?: boolean; hostConn?: { authPassSlot?: string | null } };
+        const body = req.body as {
+          visibility?: string; sharedWithUserIds?: string[]; displayName?: string; description?: string;
+          tags?: unknown; allowPrivateNetwork?: boolean; allowInsecureTls?: boolean;
+          credentialSlots?: Array<{ target: string; name: string; label: string; file: boolean }>;
+          url?: string; enabled?: boolean;
+          /** 连接参数（native host）：单字段合并，改 host/port 会清指纹 */
+          hostConn?: { host?: string; port?: number; username?: string; authSlot?: string | null; authPassSlot?: string | null };
+          /** 资产名：可改（填错修正），有 UNIQUE 约束需查重 */
+          name?: string;
+        };
+        /**
+         * 形态与执行配置**不可改**（2026-11-21 用户纠正「放太开了」）。
+         *
+         * category / executionMode / type 决定资产是什么（工具名前缀、策略作用域、实例计划）；
+         * command / args / env / headers 决定它怎么跑。建错应重建资产，不在旧资产上换形态——
+         * 这类写入口曾经开放但无 UI，属于"看不见却能改"的隐式能力，必须显式拒绝而不是静默忽略。
+         */
+        const immutable = ['category', 'executionMode', 'type', 'command', 'args', 'env', 'headers'] as const;
+        const rejected = immutable.filter((k) => (req.body as Record<string, unknown> | undefined)?.[k] !== undefined);
+        if (rejected.length > 0) {
+          return reply.code(400).send({
+            code: 400, data: null,
+            message: `以下字段创建后不可修改：${rejected.join('、')}；如需调整请重建资产`,
+          });
+        }
         const patch: Record<string, unknown> = {};
         if (body.displayName !== undefined) patch.displayName = body.displayName;
         if (body.description !== undefined) patch.description = body.description;
@@ -827,40 +851,90 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           for (const key of await serverInstanceKeys(db, id)) deps.pool?.invalidate(key);
         }
         /**
-         * 私钥口令槽位（authPassSlot）可在创建后补写。
+         * hostConn 可编辑字段（2026-11-20 用户要求「全部开放」）。
          *
-         * 为什么需要：该字段此前只在创建弹窗写入，PATCH 不接受 hostConn，导致——
-         * 建资产时选了"密码"方式、事后改用加密私钥的资产**永远**补不上口令槽位，
-         * 信任指纹与连通测试一律报 "Encrypted private OpenSSH key detected, but no passphrase given"，
-         * 即便在详情页把 AUTH_PASS 槽位绑好了也没用（解析只看 hostConn.authPassSlot）。
+         * 此前只开放 authPassSlot，导致 host/port/username 填错后**无法修正**
+         * （如迁移数据里 tke-vm-32-6 的 port=222，应为 22322），只能删了重建。
          *
-         * 白名单只开放 authPassSlot：host/port/username 等连接参数一旦可改就会绕过创建期的
-         * 校验与审计，也等于让普通成员能把资产指向别的主机。这里不做整体替换，只做单字段合并。
+         * 语义：
+         *  - 单字段合并，不整体替换（未传的键保持原值）
+         *  - 改 host 或 port ⇒ **清空 hostFingerprint**：连接目标变了，旧指纹不再对应这台机器，
+         *    留着会让下次连接直接报 "Host denied"（且用户不知道是这个原因）
+         *  - 只改 username/authSlot ⇒ 指纹保留（同一台机器）
+         *  - authSlot/authPassSlot 必须是已声明的槽位
          */
         if (body.hostConn !== undefined) {
           if (row.executionMode !== 'native' || !row.hostConn) {
-            return reply.code(400).send({ code: 400, data: null, message: '仅原生 SSH 主机支持配置口令槽位' });
+            return reply.code(400).send({ code: 400, data: null, message: '仅原生 SSH 主机支持修改连接参数' });
           }
           const cur = row.hostConn as Record<string, unknown>;
-          const slot = body.hostConn?.authPassSlot;
           const next: Record<string, unknown> = { ...cur };
-          if (slot === null || slot === '') {
-            delete next.authPassSlot;
-          } else if (slot !== undefined) {
-            if (typeof slot !== 'string') {
-              return reply.code(400).send({ code: 400, data: null, message: 'authPassSlot 必须为字符串或 null' });
+          const declared = ((row.credentialSlots ?? []) as Array<{ name?: string }>).map((s) => s.name);
+          const hcIn = body.hostConn;
+
+          for (const field of ['host', 'username', 'port', 'authSlot', 'authPassSlot'] as const) {
+            const v = hcIn[field];
+            if (v === undefined) continue;
+            if (field === 'authSlot' || field === 'authPassSlot') {
+              if (v === null || v === '') { delete next[field]; continue; }
+              if (typeof v !== 'string') {
+                return reply.code(400).send({ code: 400, data: null, message: `${field} 必须为字符串或 null` });
+              }
+              if (!declared.includes(v)) {
+                return reply.code(400).send({ code: 400, data: null, message: `资产未声明槽位 "${v}"，请先在「凭证绑定」中补槽位` });
+              }
+              next[field] = v;
+              continue;
             }
-            const declared = ((row.credentialSlots ?? []) as Array<{ name?: string }>).map((s) => s.name);
-            if (!declared.includes(slot)) {
-              return reply.code(400).send({ code: 400, data: null, message: `资产未声明槽位 "${slot}"，请先在「凭证绑定」中补槽位` });
+            if (field === 'port') {
+              if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 65535) {
+                return reply.code(400).send({ code: 400, data: null, message: 'port 必须是 1–65535 的整数' });
+              }
+              next.port = v;
+              continue;
             }
-            next.authPassSlot = slot;
+            if (typeof v !== 'string' || v.trim() === '') {
+              return reply.code(400).send({ code: 400, data: null, message: `${field} 不能为空` });
+            }
+            next[field] = v.trim();
           }
+
+          // 连接目标变了 → 旧指纹失效（必须重采，否则下次连接报 Host denied）
+          const targetChanged = next.host !== cur.host || next.port !== cur.port;
+          if (targetChanged && cur.hostFingerprint !== undefined) {
+            delete next.hostFingerprint;
+          }
+
           if (JSON.stringify(next) !== JSON.stringify(cur)) {
             patch.hostConn = next;
             await governanceAudit(audit, p, 'asset_update', {
-              serverId: id, field: 'authPassSlot', from: cur.authPassSlot ?? null, to: next.authPassSlot ?? null,
+              serverId: id, field: 'hostConn',
+              from: { host: cur.host, port: cur.port, username: cur.username, authSlot: cur.authSlot, authPassSlot: cur.authPassSlot },
+              to: { host: next.host, port: next.port, username: next.username, authSlot: next.authSlot, authPassSlot: next.authPassSlot },
+              fingerprintCleared: targetChanged && cur.hostFingerprint !== undefined,
             });
+            for (const key of await serverInstanceKeys(db, id)) deps.pool?.invalidate(key);
+          }
+        }
+        /**
+         * 资产名可修改（填错修正）。
+         * 有 UNIQUE 约束，先查重再写（否则 SQLite 抛错变 500）；也会进 MCP 工具的
+         * asset 参数取值，所以必须符合 DNS-1123（与创建路径同校验）。
+         */
+        if (body.name !== undefined) {
+          const name = typeof body.name === 'string' ? body.name.trim() : '';
+          if (!name || !DNS1123_RE.test(name)) {
+            return reply.code(400).send({ code: 400, data: null, message: 'name 必须符合 DNS-1123（小写字母数字连字符点）' });
+          }
+          if (name !== row.name) {
+            const dup = await db
+              .select({ id: schema.servers.id })
+              .from(schema.servers)
+              .where(and(eq(schema.servers.name, name), ne(schema.servers.id, id)))
+              .get();
+            if (dup) return reply.code(400).send({ code: 400, data: null, message: `资产名 "${name}" 已存在` });
+            patch.name = name;
+            await governanceAudit(audit, p, 'asset_update', { serverId: id, field: 'name', from: row.name, to: name });
           }
         }
         if (body.allowPrivateNetwork !== undefined) {
