@@ -119,6 +119,9 @@
 约束：槽位 name 必须匹配 env/args/headers 中的 `${NAME}` 占位符（应用层校验）。
 索引：`owner_id`、`visibility`
 
+> **可编辑字段（ADR-035）**：`display_name` / `description` / `tags` / `host_conn` / `url` / `allow_private_network` / `allow_insecure_tls` / `visibility` / `shared_with_user_ids` / `credential_slots` / `enabled` / `name` 可改。
+> `type` / `execution_mode` / `category` / `command` / `args` / `env` / `headers` **创建后不可改**（`PATCH` 显式 400 整批拒绝）。形态与执行配置决定工具名前缀、策略作用域与实例计划，建错应重建资产。
+
 ### 4.2 credentials（凭证 = 创建者私有资源，可按分组共享使用）
 
 > **ADR-028 修订（2026-11-06）**：凭证仍是**创建者私有资源**（管理权 = 归属人 + admin 不变），
@@ -1259,6 +1262,10 @@ export function canCredential(
 - `POST /market/batch-instantiate` → **v1.1**（决策 B），v1 返回 501 且不在路由表中注册（不注册即 default-deny 403，符合 AC-3）
 
 **资产**：`GET /servers`（按调用者可见性过滤）、`POST|GET|PATCH|DELETE /servers/:id`、`POST /servers/:id/test`（连通性 + 冷启动耗时）、`POST /servers/:id/prewarm`、`GET|PATCH /servers/:id/tools`、`GET /servers/:id/instances`
+
+> **`PATCH /servers/:id` 可改字段（ADR-035）**：`name` / `displayName` / `description` / `tags` / `hostConn` / `url` / `allowPrivateNetwork` / `allowInsecureTls` / `visibility` / `sharedWithUserIds` / `credentialSlots` / `enabled`。
+> **`category` / `executionMode` / `type` / `command` / `args` / `env` / `headers` 创建后不可改** —— 传任一即整批 400（不静默忽略、不部分生效），message 提示"如需调整请重建资产"。理由：这七个字段决定"资产是什么"（工具名前缀、策略作用域、实例计划）与"怎么跑"，在旧资产上换形态会让已绑定槽位、已签发工具名与既有审计语义同时失效。
+
 **凭证**（ADR-028 修订）：`GET|POST /credentials`（列表 = 自己创建的 ∪ 已共享到自己所在分组的 ∪ 自己实际在用的；admin 见全部；返回含 `privileges`）、`PATCH|DELETE /credentials/:id`（仅归属人 + admin；PATCH 支持 `privileges`）、`POST /credentials/:id/rotate`（触发实例失效）、`GET /credentials/:id/reveal`（**查看明文值，仅归属人 + admin；写 `credential_reveal` 治理审计**）、**`POST|DELETE /credentials/:id/shares/:groupId`**（按分组开关共享，仅归属人 + admin；写 `credential_share` 治理审计）、`GET /credentials/:id`（详情，返回 `privileges` / `sharedGroups` / `canManage`；**归属人、admin、共享分组成员可读，其余 403**）、`GET|POST /servers/:id/slots`（槽位列表返回 `bindings[]` 含 scope/label/mine；绑定时**只能绑自己创建的凭证**，`scope` 由服务端按「是否为资产归属人」判定）、`PUT|DELETE /servers/:id/slots/:slotName/value`（**槽位直填值**，ADR-027：资产自带加密密钥，非凭证；与凭证绑定互斥）、`DELETE /servers/:id/slots/:slotName`（**只能解绑自己添加的那条**；写 `credential_unbind` 审计）、`GET /credentials/candidates?assetId=`（绑定下拉数据源，仅本人凭证；`boundSlots` 只算自己的绑定）
 
 **成员**（ADR-028 §2.5）：`PATCH /users/:id` 支持 `isDisabled`（禁止禁用/降级自己）、`DELETE /users/:id`（凭证/资产转无主、清理 personal 绑定与分组关系、撤销 API Key；禁止删除自己）、`POST /admin/reassign-owner`（`{credentialId?|serverId?, newOwnerId}` 重新指派无主资源）
@@ -1368,7 +1375,7 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 | `/market`(v1 必修) | 搜索 + 分类侧栏 + MCP 卡片网格（卡片含名称/一句话描述/类别/运行时/已添加徽章） | 卡片进详情；**空态与加载态必须实现**（目录为静态资源，请求失败要能重试而非白屏） |
 | `/market/:key` | 左信息（工具清单/运行要求/仓库链接）/ 右添加面板（名称 + **可编辑配置** + 槽位取值） | 一键添加，全程不见 schema/JSON；底部折叠区"查看将生成的配置"供高级用户核对；添加成功后 → 直达 `/assets/:id`；**配置可编辑（表单 / JSON 两种方式）**：在目录默认配置上追加参数、env、kv，槽位按最终配置实时重算；**槽位取值与新建资产一致**：输入框直接填值（资产自带直填值，ADR-027）或点右侧 `+` 选择已有凭证，二者互斥 |
 | `/assets` | 筛选栏 + 表格：名称/类型/**执行模式**/状态/凭证状态/**可见范围**/近24h调用/操作 | **分页 50/页** + 类型/分组/状态/可见范围筛选 + 搜索（资产平铺，用户确认可接受）；行内"审计"按钮直达 `/audit?asset=`；勾选题批量改分组/停用/设置 `allow_private_network`；**"新建主机"走原生表单**（host/port/username/认证凭证/tags），不经过 Market（ADR-022）；**"新建 MCP 资产"入口二选一**：① 按钮跳 `/market`（推荐路径）② "高级：手填配置"展开 command/args/env 表单（直调 `POST /servers`，供目录未收录的 MCP 使用）——**两条路径都必须能完成凭证绑定** |
-| `/assets/:id` | 概要卡 + Tab（**凭证绑定**/可见性/调用统计/审计记录） | **凭证绑定 Tab（v1 缺陷必修）**：列出全部 `credentialSlots`，每行 = 槽位名 + 中文标签 + 当前绑定凭证（或"未绑定"琥珀警示）+ 下拉换绑 + 解绑；下拉数据源 `GET /credentials/candidates`（仅本人凭证）；换绑/解绑写治理审计；**全部槽位未绑定时顶部红色警示条"该资产当前不可用"**；支持"手动补槽位"（应对 Market 自动识别漏判） |
+| `/assets/:id` | 概要卡 + Tab（**凭证绑定**/可见性/调用统计/审计记录） | **凭证绑定 Tab（v1 缺陷必修）**：列出全部 `credentialSlots`，每行 = 槽位名 + 中文标签 + 当前绑定凭证（或"未绑定"琥珀警示）+ 下拉换绑 + 解绑；下拉数据源 `GET /credentials/candidates`（仅本人凭证）；换绑/解绑写治理审计；**全部槽位未绑定时顶部红色警示条"该资产当前不可用"**；支持"手动补槽位"（应对 Market 自动识别漏判）。**编辑入口唯一（ADR-035）**：头部「编辑」弹窗改基础信息/标签/连接目标，可见性 Tab 只读展示（标签、连接信息）+ 安全开关（私网、TLS），不在页面内联编辑；形态与执行配置不提供编辑入口 |
 | `/credentials` | 表格：名称/类型/**被引用数**/**实际使用者**/更新时间/操作 | 列表**只显示自己创建的 + 自己实际在用的**（admin 见全部）；被引用 0 时数字琥珀色；"实际使用者"从绑定资产可见者去重推导 |
 | `/credentials/:id` | 概要 + 引用资产列表 + 可见性 + 轮换 | 删除前强制展示将被断开的资产名单；**归属显示用户名**（非 id）；**值提示右侧眼睛图标**可查看明文（仅归属人 + admin，操作写 `credential_reveal` 审计）；**引用资产按资产去重**（一凭证绑同资产多槽位只列一行，附「绑定槽位」列） |
 | `/groups` | 分组卡片：组名/资产数/**工具数**/成员数/端点 | **不预置任何分组**（ADR-026），全部由管理员自由创建；工具数恒定但资产数大时琥珀提示条 + 建议 tag 收窄；抽屉编辑（资产+成员勾选） |
@@ -1442,7 +1449,7 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 
 ---
 
-## 9. 验收标准（68 条 EARS，重点摘录）
+## 9. 验收标准（78 条 EARS，重点摘录）
 
 1. **default-deny**：新增任一路由未声明 `accessMode` 时，编译不通过
 2. **default-deny**：注册清单外的 `public` 路由时，进程启动失败并打印违规路由
@@ -1526,6 +1533,8 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 74. **取值顺序**（ADR-028）：直填值 > 指定 credential > personal > asset（多 asset 按 privileges 排序 root→rw→wo→ro→无）；`tools/call` 可传可选 `credential` 参数指定凭证，无权使用返回 `-32006`；不传 userId 的系统路径只取 asset
 75. **成员变动**（ADR-028）：① 移出分组 → personal 绑定保留，但不复能用该组的共享凭证 ② 删除成员 → 凭证/资产保留且 `owner_id` 置 NULL、personal 绑定清理、已签发 API Key 撤销、admin 可 `POST /admin/reassign-owner` 重新指派 ③ 禁用成员 → Web 登录被拒（登录页明确提示"账号已被禁用"，密码错误时仍返回通用提示不泄露状态），**API Key 的 MCP 调用不受影响**
 76. **工具描述凭证可见性**（ADR-028）：派生工具描述列出「可用凭证：名称(私有/共享/等级)」；只含自己的绑定与他人 asset 绑定，他人 personal 不出现
+77. **资产编辑范围**（ADR-035）：`PATCH /servers/:id` 对 `category` / `executionMode` / `type` / `command` / `args` / `env` / `headers` 任一字段返回 **400 且 message 含"不可修改"**；请求若同时含合法字段与上述任一字段，**整批拒绝、合法字段也不落库**；`name` / `displayName` / `description` / `tags` / `hostConn` / `url` / 安全开关 / `visibility` / `credentialSlots` / `enabled` 照常可改（对照组证明拒绝不是一刀切）
+78. **资产编辑不产生隐式副作用**（ADR-035）：不可改字段被拒时，实例不被回收、不写 `asset_update` 审计、`updated_at` 不变
 
 ---
 
@@ -1675,3 +1684,4 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 | **ADR-032** | **MCP 单入口分层暴露**（用户 2026-11-18 提出，起因：品类从 3 涨到 11、裸 `/mcp` 245 工具 > `tools.list_max`=200 直接 500，`office-k8s/ES/Kafka/Prometheus` 等只能走 `?group=` 而该入口同样超限）：① **`/mcp` 是唯一入口**，初始化**只返回平台工具**（初版 5 个），不再派生任何品类/资产工具——裸连接的工具数恒定，结构上不可能再撞上限。② 新增 `opsgate_select_scope({group?, category?, tag?})`：按**范围**（不是资产清单）重算工具集并**替换**本会话视图（不累积），成功后 `sendToolListChanged()`。③ **派生粒度仍是品类**：300 台虚拟机同属 `host`，共用同一套 11 个工具，靠 `asset` 入参区分；工具数与资产数解耦（这才是 Spec §5.5.1 的原始目标，被前几版实现漂移成"全量平铺"）。④ 带 `?group=`/`?category=`/`?tag=` 的 URL 视为"初始化即选定该范围"，仍是同一入口同一范式；不加参数则停在平台工具层。⑤ **推翻了 J2/J3 的"无元工具"结论**：当年否决的理由是"按品类聚合后工具数恒定"，但实际品类数随接入增长，恒定假设不成立。⑥ 顺带修四个暴露层缺陷：D1 `pruneDerivedSchema` 同步裁剪 `required`（原留下"必填但无法填"的幽灵参数）；D5 审计意图记录凭证失败不再阻断调用（原把槽位错误吞成 "Audit unavailable"）；P1 原生与派生工具共享同一张查重表（原 `host_execute_command` 在同视图出现两次）；D3 `?category=` 校验改为从 `servers.category ∪ market_entries.categories` 动态取（原 `TOOL_CATEGORIES` 硬编码白名单让 5 个品类完全不可达）。⑦ `nacos_health` 改调 `/v1/console/server/state` + `/v1/console/health/readiness`（`/v1/ns/operator/servers` 在 Nacos 2.x 已移除，实测 501）。⑧ instructions 的内置安全骨架不可被覆盖，新增 `mcp.instructions` 设置项（`system_settings`，无需重启）由管理员追加，前端 Settings 页多行 Markdown 编辑 + 预览 | §5.5.1、§5.5.2、§5.5.4、§5.10.6、§9 AC-29/30/36、`src/services/toolAggregation.ts`、`src/services/mcpEndpoint.ts`、`src/config/settingsSchema.ts`、`frontend/src/pages/Settings.tsx`、`docs/adr-032.md` |
 | **ADR-033** | **元工具 `opsgate_invoke` 定为默认调用路径**（用户 2026-11-18 拍板，起因：ADR-032 的 `select_scope` 依赖客户端消费 `notifications/tools/list_changed`，而 **opencode 2.2.6 Code Mode 在同一轮对话内只构建一次工具目录**——`select_scope` 后本轮 `tools.*` 仍是 5 个平台工具，跨轮 `--continue` 也不刷新；服务端协议层实测正常，故不能把"客户端会刷新"当作可用性前提）：① 平台工具从 5 个增到 **7 个**，新增 `opsgate_list_asset_tools({asset})` 与 `opsgate_invoke({asset, tool, args})`。② `opsgate_invoke` 的 `tool` 必须属于该资产**当前可用工具集**（与 `list_asset_tools` 共用同一份 `toolsOfAsset()`），否则 `-32601` —— **不新开任意透传口**，`tool_filters`/品类过滤/停用开关/槽位归因全部照常生效。③ `list_asset_tools` 返回的 schema **去掉 `asset` 参数**（已提升为元工具外层参数）。④ `opsgate_select_scope` **保留为可选优化**（支持 `list_changed` 的客户端可少一层嵌套），不删除。⑤ **取代 J3 的"元工具不做兼容保留"**：元工具现在是默认路径而非旁路。⑥ `dispatchDerived` 形参由 `ExposedTool` 收窄为 `toolRef: string`，两条入口共用同一派生链路 | §5.5.1、§5.5.6、§9 AC-36a、`src/services/toolAggregation.ts`（`toolsOfAsset`）、`src/services/mcpEndpoint.ts`（`listAssetTools`/`invokeOnAsset`）、`docs/adr-033.md` |
 | **ADR-034** | **同槽位多凭证的确定性择优**（用户 2026-11-19 拍板，起因：v1→v2 数据迁移后发现 73 个槽位存在多条绑定；`privileges` 回填前有 66 个槽位的取舍不确定，回填后仍有 7 个槽位候选凭证**权限等级相同**，旧实现仅按 `privileges` 排序，同分时结果取决于 SQLite 返回行序 —— 同一份数据在不同机器/不同查询计划下可能取到不同账号，属隐式不确定）：① 排序键改为三级：**权限等级**（沿用 ADR-028 §2.4 的 root→rw→wo→ro→无）→ **管理类账号优先**（凭证名或绑定用户名匹配 `root`/`admin`/`administrator`/`superuser`/`superadmin`，按词边界匹配，避免误命中 `rootfs` 之类）→ **`credentialId` 字典序**。② 该规则只影响「多条绑定都已经可选、现在要挑一条」的场景，**不改变** personal 优先于 asset 的层级，也不改变任何授权判定（`privileges` 仍是展示性元信息，ADR-028 §④ 不变）。③ 实现集中在 `pickBestBinding()`，`resolveSlotValues` 与 `slotCredentialKey` 共用，避免两处口径漂移。④ `src/credential-tiebreak.test.ts` 锁定行为：业务账号先插入时仍应取到 root 账号，且重复调用结果一致。⑤ **不为存量数据伪造等级**：同等级绑定的取舍一律由本规则确定，不靠改写 `privileges` 让排序"看起来对"。迁移数据实测（`verify-real-resolve.mjs`，用 `.60` 上真实 `CredentialService`）：7 处同等级槽位 **7/7 落到管理账号**（其中 3 处是绑定用户名=`root` 的 `k8s-vm` 凭证，按"凭证名或绑定用户名"判定为管理账号）。 | §4.3、§5.3 槽位取值、`src/services/credentials.ts`（`pickBestBinding`）、`src/credential-tiebreak.test.ts` |
+| **ADR-035** | **资产形态与执行配置创建后不可改**（用户 2026-11-21 纠正"编辑功能放太开了"）：① 新建资产时可调的只有**标签、凭证绑定、基础信息与名称**；编辑时同样只能改这些，外加**连接目标**（原生 host 的 `hostConn{host,port,username,authSlot,authPassSlot}`）与**安全开关**（`allowPrivateNetwork` / `allowInsecureTls`）——用户选择口径为"基础信息 + 连接目标"。② `PATCH /servers/:id` 对 `category` / `executionMode` / `type` / `command` / `args` / `env` / `headers` **显式 400 拒绝**，且**整批拒绝**（含合法字段的混合请求也不落库），不做静默忽略（静默忽略会让调用方以为改成功了）。③ **推翻 ADR 前序实现**：`79b5c56` 曾开放形态字段修改并做形态自洽矩阵校验，`a38ac69` 曾开放执行配置修改 —— 两者均回撤，`src/asset-shape-edit.integration.test.ts`（9 例）随之删除。④ UI 同步收敛：详情页「可见性」Tab 的标签/地址/私网/TLS 内联编辑全部移除，改为**只读展示 + 顶部「编辑」弹窗**，单一入口避免两处可写；TLS 开关按用户二次确认回到可见性 Tab（属资产级安全开关，非形态）。⑤ 建错形态的唯一路径是**重建资产**，不在旧资产上换形态 —— 换形态会让已绑槽位、已签发工具名（`{category}_{tool}`）与既有审计语义同时失效 | §4.1 字段、§7 `PATCH /servers/:id` 可改字段、§8.5 `/assets/:id`、§9 AC-77/78、`src/routes/assets.ts`（`immutable` 前置拒绝）、`frontend/src/components/AssetEditModal.tsx`、`src/asset-immutable-fields.integration.test.ts` |

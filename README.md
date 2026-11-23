@@ -102,6 +102,7 @@ The whole project has exactly one authorization function, `can()` (`src/services
 ### Asset management
 
 - Asset registry: category, execution mode, connection parameters, visibility (`owner` / `group` / `public`), group membership
+- Editing is scoped: name, display name, description, tags, connection target (host / port / username / auth slots), URL and the two security switches are editable; **category, execution mode, transport type, command, args, env and headers are fixed at creation** — the PATCH endpoint rejects them outright (400) rather than silently ignoring, so a mis-shaped asset is rebuilt, not mutated
 - Bulk enable / disable
 - Self-signed TLS certificates supported (enabled explicitly per asset, off by default)
 
@@ -334,7 +335,7 @@ frontend/
 └── src/pages/              18 admin console pages
 ```
 
-**Key technical decisions** (full records, including ADR-001 to ADR-034, are in `docs/opsgate-spec-v1.md` §10)
+**Key technical decisions** (full records, including ADR-001 to ADR-035, are in `docs/opsgate-spec-v1.md` §10)
 
 | Decision | Content |
 |---|---|
@@ -343,6 +344,7 @@ frontend/
 | ADR-030 | `?group=` filters by group entity |
 | ADR-032 | MCP single entry with layered exposure + `opsgate_select_scope` |
 | ADR-033 | Meta-tool `opsgate_invoke`, independent of client tool refresh |
+| ADR-035 | Asset shape and execution config are immutable after creation |
 
 ---
 
@@ -420,7 +422,7 @@ pnpm run seed                # write seed data (built-in rules, Market catalog)
 
 | Document | Contents |
 |---|---|
-| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | Authoritative design: data model, tool exposure, security constraints, API, acceptance criteria, and all architecture decision records (ADR-001 to ADR-034) in §10 |
+| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | Authoritative design: data model, tool exposure, security constraints, API, acceptance criteria, and all architecture decision records (ADR-001 to ADR-035) in §10 |
 | [`docs/deploy.md`](docs/deploy.md) | Deployment, backup, migration, known limitations |
 
 > The documents above are written in Chinese.

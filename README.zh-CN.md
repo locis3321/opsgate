@@ -102,6 +102,7 @@ L1 采用**声明式 schema**：`src/config/settingsSchema.ts` 是唯一定义�
 ### 资产管理
 
 - 资产登记：品类、执行模式、连接参数、可见性（`owner` / `group` / `public`）、所属分组
+- 编辑范围受限：名称、显示名、说明、标签、连接目标（host / port / 用户名 / 认证槽位）、地址与两个安全开关可改；**品类、执行模式、传输类型、command、args、env、headers 创建后固定** —— PATCH 接口直接 400 拒绝而不是静默忽略，形态建错应重建资产而非改造旧资产
 - 批量启用 / 停用
 - 支持自签 TLS 证书（按资产显式开启，默认关闭）
 
@@ -333,7 +334,7 @@ frontend/
 └── src/pages/              18 个控制台页面
 ```
 
-**关键技术决策**（完整记录含 ADR-001 至 ADR-034，见 `docs/opsgate-spec-v1.md` §10）
+**关键技术决策**（完整记录含 ADR-001 至 ADR-035，见 `docs/opsgate-spec-v1.md` §10）
 
 | 决策 | 内容 |
 |---|---|
@@ -342,6 +343,7 @@ frontend/
 | ADR-030 | `?group=` 改为按分组实体过滤 |
 | ADR-032 | MCP 单入口分层暴露 + `opsgate_select_scope` |
 | ADR-033 | 元工具 `opsgate_invoke`，不依赖客户端刷新工具目录 |
+| ADR-035 | 资产形态与执行配置创建后不可改 |
 
 ---
 
@@ -419,7 +421,7 @@ pnpm run seed                # 写入种子数据（内置规则、Market 目录
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | 设计权威：数据模型、工具暴露、安全约束、API、验收标准，以及 ADR-001 至 ADR-034 全部架构决策记录（§10） |
+| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | 设计权威：数据模型、工具暴露、安全约束、API、验收标准，以及 ADR-001 至 ADR-035 全部架构决策记录（§10） |
 | [`docs/deploy.md`](docs/deploy.md) | 部署、备份、迁移、已知限制 |
 
 ---
