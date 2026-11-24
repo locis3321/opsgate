@@ -15,9 +15,9 @@ import { Settings } from './config/settings.js';
 import * as schema from './db/schema.js';
 import { ensureAuditTable } from './db/audit.js';
 import { createSettingsStorage } from './db/settings-store.js';
-import { guardRules, marketEntries } from './db/schema.js';
+import { guardRules } from './db/schema.js';
 import { BUILTIN_GUARD_RULES } from './db/builtinGuardRules.js';
-import { entryToRow } from './db/marketEntries.js';
+import { syncCatalogEntries } from './db/marketSeedSync.js';
 import { loadCatalog } from './services/marketCatalog.js';
 import { createAuth, createUserWithPassword, ensureAuthTables } from './services/auth.js';
 import { buildApp } from './app.js';
@@ -32,8 +32,12 @@ import { setTransferService } from './services/transferInstance.js';
 import { SshConnector } from './native/connectors/ssh.js';
 import { registerConnector } from './native/connectors/index.js';
 import { createHttpConnector } from './native/connectors/http.js';
+import { RedisConnector } from './native/connectors/redis.js';
+import { KafkaConnector } from './native/connectors/kafka.js';
 import { makeNativeDispatchServices } from './services/nativeDispatch.js';
 import { resolveSshCredential } from './services/sshCredential.js';
+import { resolveRedisConnection } from './services/redisConnection.js';
+import { resolveKafkaConnection } from './services/kafkaConnection.js';
 import { InstancePool } from './services/instancePool.js';
 import { McpEndpoint } from './services/mcpEndpoint.js';
 import { canOnAsset } from './services/authzBuilder.js';
@@ -68,16 +72,16 @@ async function main(): Promise<void> {
   await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
   ensureAuditTable(sqlite);
 
-  // 首启 seed 内置 Market 目录（ADR-029）：仅在表为空时导入，幂等且不覆盖后台已改条目。
-  // 为什么不在迁移里 INSERT：目录是主数据，需与 market-catalog.json 保持单一来源。
-  const existingEntries = db.select({ key: marketEntries.key }).from(marketEntries).limit(1).get();
-  if (!existingEntries) {
-    let seeded = 0;
-    for (const entry of loadCatalog()) {
-      const res = db.insert(marketEntries).values(entryToRow(entry, 'verified')).onConflictDoNothing({ target: marketEntries.key }).run();
-      if (res.changes > 0) seeded++;
-    }
-    console.log(`[bootstrap] 已导入内置 Market 目录 ${seeded} 条（首启）`);
+  // 内置 Market 目录同步（ADR-029）：用一次性 marker 记录"代码播种过哪些 key"，
+  // 只补**代码新增**的条目，不覆盖后台编辑、不复活管理员删掉的条目。
+  // 原实现是「表为空才导入」，导致部署机一旦有数据，后续新增条目永远不会出现。
+  const marketMarker = path.join(cfg.dataDir, '.market-seeded');
+  const catalogSync = syncCatalogEntries(db, loadCatalog(), marketMarker);
+  if (catalogSync.inserted.length > 0) {
+    console.log(`[bootstrap] Market 目录新增 ${catalogSync.inserted.length} 条：${catalogSync.inserted.join(', ')}`);
+  }
+  if (catalogSync.skippedDeleted.length > 0) {
+    console.log(`[bootstrap] Market 目录跳过已被管理员删除的 ${catalogSync.skippedDeleted.length} 条：${catalogSync.skippedDeleted.join(', ')}`);
   }
 
   // 首启 seed 内置安全策略（§4.7）：生产部署不会跑 `pnpm run seed`，此前只靠手工执行，
@@ -163,6 +167,20 @@ async function main(): Promise<void> {
     // 这里给到 /nacos/v1，工具内部再按需回退根路径（见 nacos/_shared.ts）
     baseUrlOf: (asset) => `${(asset.url ?? '').replace(/\/+$/, '')}/nacos/v1`,
   }, { timeoutMs: httpTimeoutMs }));
+  // 长连接型 connector（Redis / Kafka）：连接池 + idle TTL + 凭证轮换后 invalidate。
+  // 凭证在 resolveConnection 里解密后直接建连，不进入 env / 子进程实参（与 SSH 同口径）。
+  const redisConnector = new RedisConnector({
+    idleTtlMs: () => settings.get<number>('ssh_pool.idle_ttl_sec') * 1000,
+    connectTimeoutMs: () => settings.get<number>('tools.command_timeout_sec') * 1000,
+    resolveConnection: (asset, userId) => Promise.resolve(resolveRedisConnection(credentials, asset, userId)),
+  });
+  registerConnector(redisConnector);
+  const kafkaConnector = new KafkaConnector({
+    idleTtlMs: () => settings.get<number>('ssh_pool.idle_ttl_sec') * 1000,
+    connectTimeoutMs: () => settings.get<number>('tools.command_timeout_sec') * 1000,
+    resolveConnection: (asset, userId) => Promise.resolve(resolveKafkaConnection(credentials, asset, userId)),
+  });
+  registerConnector(kafkaConnector);
   const dispatch: DispatchServices = makeNativeDispatchServices({ sqlite, db, settings, audit, credentials });
 
   void dispatch; // T7 编排层实际消费
@@ -267,6 +285,8 @@ async function main(): Promise<void> {
     logLevel: cfg.logLevel,
     transfer,
     ssh,
+    redis: redisConnector,
+    kafka: kafkaConnector,
     credentials,
     audit,
     settings,

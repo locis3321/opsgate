@@ -452,8 +452,22 @@ describe('R6 修复回归（F-R6-1/4/5 + AC-67）', () => {
     expect(String(metrics.json.data)).toContain('opsgate_instances_ready');
     expect((await request(bobCookie, 'GET', '/api/v1/runtime/ssh-connections')).status).toBe(200);
     expect((await request(bobCookie, 'GET', '/api/v1/runtime/transfer-staging')).status).toBe(200);
+    // 长连接池（ADR-036）：未注册 connector 时也要返回结构（available=false），不能 404
+    const longConn = await request(bobCookie, 'GET', '/api/v1/runtime/long-connections');
+    expect(longConn.status).toBe(200);
+    const lc = longConn.json.data as {
+      redis: { active: number; idle: number; total: number; available: boolean };
+      kafka: { active: number; idle: number; total: number; available: boolean };
+    };
+    for (const pool of [lc.redis, lc.kafka]) {
+      expect(typeof pool.active).toBe('number');
+      expect(typeof pool.idle).toBe('number');
+      expect(typeof pool.total).toBe('number');
+      expect(typeof pool.available).toBe('boolean');
+    }
     // 非 admin → 403
     expect((await api('GET', '/api/v1/runtime/metrics')).status).toBe(403);
+    expect((await api('GET', '/api/v1/runtime/long-connections')).status).toBe(403);
   });
 });
 

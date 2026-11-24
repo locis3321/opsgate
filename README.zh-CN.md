@@ -326,15 +326,15 @@ src/
 ├── db/                     Drizzle schema、迁移、种子
 ├── framework/              原生工具契约与 dispatch
 ├── native/
-│   ├── connectors/         ssh2 / HTTP 连接器
-│   └── tools/              host / zabbix / rocketmq / nacos 原生工具
+│   ├── connectors/         ssh2 / HTTP / redis / kafka 连接器
+│   └── tools/              host / zabbix / rocketmq / nacos / redis / kafka 原生工具
 ├── routes/                 REST 路由（15 个路由模块）
 └── services/               领域服务（聚合、实例池、审计、凭证、策略…）
 frontend/
 └── src/pages/              18 个控制台页面
 ```
 
-**关键技术决策**（完整记录含 ADR-001 至 ADR-035，见 `docs/opsgate-spec-v1.md` §10）
+**关键技术决策**（完整记录含 ADR-001 至 ADR-036，见 `docs/opsgate-spec-v1.md` §10）
 
 | 决策 | 内容 |
 |---|---|
@@ -344,6 +344,7 @@ frontend/
 | ADR-032 | MCP 单入口分层暴露 + `opsgate_select_scope` |
 | ADR-033 | 元工具 `opsgate_invoke`，不依赖客户端刷新工具目录 |
 | ADR-035 | 资产形态与执行配置创建后不可改 |
+| ADR-036 | 原生运维能力扩容（Redis/Kafka connector、raw 工具准入） |
 
 ---
 
@@ -421,7 +422,7 @@ pnpm run seed                # 写入种子数据（内置规则、Market 目录
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | 设计权威：数据模型、工具暴露、安全约束、API、验收标准，以及 ADR-001 至 ADR-035 全部架构决策记录（§10） |
+| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | 设计权威：数据模型、工具暴露、安全约束、API、验收标准，以及 ADR-001 至 ADR-036 全部架构决策记录（§10） |
 | [`docs/deploy.md`](docs/deploy.md) | 部署、备份、迁移、已知限制 |
 
 ---

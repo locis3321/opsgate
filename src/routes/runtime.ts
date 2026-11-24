@@ -8,6 +8,8 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import * as schema from '../db/schema.js';
 import type { InstancePool } from '../services/instancePool.js';
 import type { SshConnector } from '../native/connectors/ssh.js';
+import type { RedisConnector } from '../native/connectors/redis.js';
+import type { KafkaConnector } from '../native/connectors/kafka.js';
 import type { TransferService } from '../services/transfer.js';
 import { sampleProcesses } from '../services/processSampler.js';
 import type { AuditService } from '../services/audit.js';
@@ -16,6 +18,9 @@ import type { RouteDefinition } from './registry.js';
 export interface RuntimeRouteDeps {
   pool?: InstancePool;
   ssh?: SshConnector;
+  /** 长连接池（ADR-036）：与 HTTP connector 不同，这里有真实连接需要观测与回收 */
+  redis?: RedisConnector;
+  kafka?: KafkaConnector;
   transfer?: TransferService;
   db?: BetterSQLite3Database<typeof schema>;
   audit?: AuditService;
@@ -126,6 +131,25 @@ export function makeRuntimeRoutes(deps: RuntimeRouteDeps): RouteDefinition[] {
     },
     {
       method: 'GET',
+      url: '/api/v1/runtime/long-connections',
+      accessMode: 'admin',
+      handler: async (_req: FastifyRequest, reply: FastifyReply) => {
+        // Redis/Kafka 是有状态长连接（ADR-036）：stats() 的 active 表示"有调用在用"，
+        // idle 表示"连接还开着但没人用"（等 idle TTL 回收）——两者相加才是实际打开的连接数。
+        const r = deps.redis?.stats() ?? { active: 0, idle: 0, total: 0 };
+        const k = deps.kafka?.stats() ?? { active: 0, idle: 0, total: 0 };
+        return reply.send({
+          code: 0,
+          data: {
+            redis: { ...r, available: deps.redis !== undefined },
+            kafka: { ...k, available: deps.kafka !== undefined },
+          },
+          message: 'ok',
+        });
+      },
+    },
+    {
+      method: 'GET',
       url: '/api/v1/runtime/metrics',
       accessMode: 'admin',
       handler: async (_req: FastifyRequest, reply: FastifyReply) => {
@@ -133,6 +157,8 @@ export function makeRuntimeRoutes(deps: RuntimeRouteDeps): RouteDefinition[] {
         const mem = process.memoryUsage();
         const ssh = deps.ssh?.stats();
         const staging = deps.transfer?.stagingStats();
+        const redis = deps.redis?.stats();
+        const kafka = deps.kafka?.stats();
         const lines = [
           '# HELP opsgate_instances_ready MCP 实例池 ready 实例数',
           '# TYPE opsgate_instances_ready gauge',
@@ -155,6 +181,14 @@ export function makeRuntimeRoutes(deps: RuntimeRouteDeps): RouteDefinition[] {
           `opsgate_transfer_staging_files ${staging?.files ?? 0}`,
           '# TYPE opsgate_transfer_staging_bytes gauge',
           `opsgate_transfer_staging_bytes ${staging?.bytes ?? 0}`,
+          '# TYPE opsgate_redis_connections_active gauge',
+          `opsgate_redis_connections_active ${redis?.active ?? 0}`,
+          '# TYPE opsgate_redis_connections_idle gauge',
+          `opsgate_redis_connections_idle ${redis?.idle ?? 0}`,
+          '# TYPE opsgate_kafka_connections_active gauge',
+          `opsgate_kafka_connections_active ${kafka?.active ?? 0}`,
+          '# TYPE opsgate_kafka_connections_idle gauge',
+          `opsgate_kafka_connections_idle ${kafka?.idle ?? 0}`,
           '',
         ];
         return reply.type('text/plain; version=0.0.4').send(lines.join('\n'));

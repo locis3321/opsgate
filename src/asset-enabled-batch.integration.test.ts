@@ -143,6 +143,29 @@ describe('停用资产不进入工具发现（enabled 必须真实生效）', ()
   });
 });
 
+describe('品类筛选下拉的数据源（列表响应带 categories）', () => {
+  it('无该品类资产时，categories 仍包含它（供前端筛选下拉使用）', async () => {
+    // 只建一台 redis 资产；列表默认返回第 1 页，redis 之外的品类若来自当页派生就会缺失
+    const redisId = await mkAsset(adminId, 'cat-redis-a', { category: 'redis', hostConn: null });
+    expect(redisId).toBeTruthy();
+
+    const all = await api(adminCookie, 'GET', '/api/v1/servers');
+    const cats = (all.json.data as { categories?: string[] }).categories ?? [];
+    // 后端应按**全部可见资产**派生，而不是当页
+    expect(cats).toContain('redis');
+    expect(cats).toContain('host');
+  });
+
+  it('翻到很后的页时 categories 不缩水（不再随页码变化）', async () => {
+    const p1 = await api(adminCookie, 'GET', '/api/v1/servers?page=1');
+    const p99 = await api(adminCookie, 'GET', '/api/v1/servers?page=99');
+    const c1 = (p1.json.data as { categories?: string[] }).categories ?? [];
+    const c99 = (p99.json.data as { categories?: string[] }).categories ?? [];
+    expect(c99).toEqual(c1);
+    expect(c99.length).toBeGreaterThan(0);
+  });
+});
+
 describe('批量操作（POST /servers/batch）', () => {
   it('批量停用：返回 succeeded，且全部落库为 false', async () => {
     const a = await mkAsset(adminId, 'batch-a');

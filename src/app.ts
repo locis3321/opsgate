@@ -34,6 +34,8 @@ import { makeNativeToolRoutes } from './routes/nativeTools.js';
 import type { Settings } from './config/settings.js';
 import type { Database } from 'better-sqlite3';
 import type { SshConnector } from './native/connectors/ssh.js';
+import type { RedisConnector } from './native/connectors/redis.js';
+import type { KafkaConnector } from './native/connectors/kafka.js';
 import type { AuditService } from './services/audit.js';
 import type { CredentialService } from './services/credentials.js';
 import type { TransferService } from './services/transfer.js';
@@ -49,6 +51,9 @@ export interface AppDeps {
   verifyTransferToken?: AuthorizeContext['verifyTransferToken'];
   transfer?: TransferService;
   ssh?: SshConnector;
+  /** 长连接池（ADR-036）；仅 /runtime 观测使用 */
+  redis?: RedisConnector;
+  kafka?: KafkaConnector;
   credentials?: CredentialService;
   audit?: AuditService;
   settings?: Settings;
@@ -104,7 +109,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...makeUserRoutes(db, auth, deps.audit),
     ...makeSshRoutes({ db, credentials: deps.credentials! }),
     ...makeTransferRoutes({ db, transfer: deps.transfer!, ssh: deps.ssh!, credentials: deps.credentials!, audit: deps.audit! }),
-    ...makeRuntimeRoutes({ pool: deps.instancePool, ssh: deps.ssh, transfer: deps.transfer, db, audit: deps.audit }),
+    ...makeRuntimeRoutes({ pool: deps.instancePool, ssh: deps.ssh, redis: deps.redis, kafka: deps.kafka, transfer: deps.transfer, db, audit: deps.audit }),
     ...(deps.mcp ? makeMcpRoutes(deps.mcp) : mcpStubRoutes),
     ...(deps.frontendDist ? makeStaticRoutes(deps.frontendDist) : []),
     ...(deps.audit && deps.settings

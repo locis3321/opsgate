@@ -28,6 +28,10 @@ import type { SshConnector } from '../native/connectors/ssh.js';
 import type { CredentialService } from '../services/credentials.js';
 import { pickBestBinding, resolveSlotKey } from '../services/credentials.js';
 import { buildPlan, makeRefResolver } from '../services/instancePlan.js';
+import { Redis } from 'ioredis';
+import { Kafka, logLevel } from 'kafkajs';
+import { resolveRedisConnection } from '../services/redisConnection.js';
+import { resolveKafkaConnection } from '../services/kafkaConnection.js';
 import type { RouteDefinition } from './registry.js';
 
 const DNS1123_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
@@ -170,7 +174,9 @@ async function probeHttpNative(
   credentials: CredentialService | undefined,
   reply: FastifyReply,
 ): Promise<FastifyReply> {
-  if (!asset.url) {
+  // Redis / Kafka 的地址可以来自槽位（REDIS_HOST / KAFKA_BROKERS），因此不强制 url
+  const isLongConn = asset.category === 'redis' || asset.category === 'kafka';
+  if (!asset.url && !isLongConn) {
     return reply.code(400).send({ code: 400, data: null, message: '该资产缺少管理 API 地址（URL），请先在配置里填写' });
   }
   const slots = ((asset.credentialSlots ?? []) as Array<{ name: string }>).map((s) => s.name);
@@ -186,7 +192,7 @@ async function probeHttpNative(
       return reply.code(400).send({ code: 400, data: null, message: err instanceof Error ? err.message : String(err) });
     }
   }
-  const base = asset.url.replace(/\/+$/, '');
+  const base = (asset.url ?? '').replace(/\/+$/, '');
   // 与工具调用同一连接栈：自签证书资产在这里同样跳过校验
   const handle = makeHandle(base, 10_000, asset.allowInsecureTls ? insecureFetch : undefined);
   const auth = creds['ZABBIX_TOKEN'] ?? creds['ROCKETMQ_TOKEN'];
@@ -226,6 +232,86 @@ async function probeHttpNative(
       }
       const text = await nacosHandle.requestText('/nacos/v1/console/health/readiness', { headers: nacosAuth });
       return reply.send({ code: 0, data: { ok: true, mode: 'native-http', detail: `Nacos readiness: ${text.trim()}` }, message: 'ok' });
+    }
+    // Redis / Kafka 是长连接品类（ADR-036），不走 HTTP handle：
+    // 必须用与工具调用**同一个**连接解析器 + 同一个 connector 建连，
+    // 否则会出现"探活通过但真实调用连不上"（地址/凭证口径不一致）。
+    if (asset.category === 'redis' || asset.category === 'kafka') {
+      const view = {
+        id: asset.id,
+        name: asset.name,
+        category: asset.category,
+        ownerId: null,
+        executionMode: 'native' as const,
+        url: asset.url,
+        allowInsecureTls: asset.allowInsecureTls === true,
+        credentialSlots: (asset.credentialSlots ?? []) as never,
+        configHash: asset.configHash,
+      };
+      if (asset.category === 'redis') {
+        if (!credentials) return reply.code(503).send({ code: 503, data: null, message: '凭证服务未初始化' });
+        const conn = resolveRedisConnection(credentials, view as never, userId);
+        const client = new Redis({
+          host: conn.host,
+          port: conn.port,
+          ...(conn.password ? { password: conn.password } : {}),
+          db: conn.db,
+          ...(conn.tls ? { tls: {} } : {}),
+          lazyConnect: true,
+          enableOfflineQueue: false,
+          connectTimeout: 8000,
+          maxRetriesPerRequest: 1,
+          retryStrategy: () => null,
+        });
+        try {
+          await client.connect();
+          const pong = await client.ping();
+          const info = await client.info('server');
+          await client.quit().catch(() => undefined);
+          const version = /redis_version:([^\r\n]+)/.exec(info)?.[1]?.trim() ?? '';
+          return reply.send({
+            code: 0,
+            data: { ok: true, mode: 'native-redis', detail: `PING ${pong}${version ? `, Redis ${version}` : ''}` },
+            message: 'ok',
+          });
+        } catch (err) {
+          await client.disconnect();
+          const m = err instanceof Error ? err.message : String(err);
+          return reply.code(502).send({ code: 502, data: null, message: `连通性测试失败：${m}` });
+        }
+      }
+      // kafka：admin.connect() + describeCluster 是最轻的真实建连验证
+      if (!credentials) return reply.code(503).send({ code: 503, data: null, message: '凭证服务未初始化' });
+      const kconn = resolveKafkaConnection(credentials, view as never, userId);
+      const kafka = new Kafka({
+        clientId: kconn.clientId,
+        brokers: kconn.brokers,
+        ...(kconn.ssl ? { ssl: true } : {}),
+        ...(kconn.sasl ? { sasl: kconn.sasl } : {}),
+        connectionTimeout: 8000,
+        authenticationTimeout: 8000,
+        logLevel: logLevel.ERROR,
+        retry: { retries: 1, initialRetryTime: 200 },
+      });
+      const admin = kafka.admin();
+      try {
+        await admin.connect();
+        const cluster = await admin.describeCluster();
+        await admin.disconnect().catch(() => undefined);
+        return reply.send({
+          code: 0,
+          data: {
+            ok: true,
+            mode: 'native-kafka',
+            detail: `已连接 ${cluster.brokers.length} 个 broker${cluster.clusterId ? `，clusterId ${cluster.clusterId}` : ''}`,
+          },
+          message: 'ok',
+        });
+      } catch (err) {
+        await admin.disconnect().catch(() => undefined);
+        const m = err instanceof Error ? err.message : String(err);
+        return reply.code(502).send({ code: 502, data: null, message: `连通性测试失败：${m}` });
+      }
     }
     return reply.code(400).send({ code: 400, data: null, message: `不支持的原生品类 ${asset.category} 连通性测试` });
   } catch (err) {
@@ -531,7 +617,11 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
             (!q.visibility || r.visibility === q.visibility) &&
             (!q.tag || ((r.tags as string[] | null) ?? []).includes(q.tag)),
         );
-        return reply.send({ code: 0, data: { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page }, message: 'ok' });
+        // 品类清单从**全部可见资产**派生（不是当页）：这是筛选下拉的数据源。
+        // 原实现让前端从当页 items 派生，导致「某品类没有资产或不在当前页 → 下拉里看不到它」，
+        // 新建的原生品类（redis/kafka）在默认视图里根本不出现，无法用下拉筛出来。
+        const categories = [...new Set(rows.map((r) => r.category).filter(Boolean))].sort();
+        return reply.send({ code: 0, data: { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, categories }, message: 'ok' });
       },
     },
     {
@@ -547,6 +637,8 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           url?: string; headers?: Record<string, unknown>; tags?: unknown; credentialSlots?: unknown[];
           /** 允许不安全 TLS（自签证书）；默认 false */
           allowInsecureTls?: boolean;
+          /** 允许私网地址（内网原生资产必填）；默认 false，与 PATCH / Market 实例化同口径 */
+          allowPrivateNetwork?: boolean;
           /** 槽位凭证绑定（创建即绑定）：slotName → credentialId */
           credentialBindings?: Record<string, string>;
           /** 槽位直填值（ADR-027，非凭证）：随创建一次落库，与凭证绑定同槽位互斥 */
@@ -560,9 +652,9 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         }
         const executionMode = body.executionMode ?? (body.category === 'host' ? 'native' : 'mcp');
         if (!['native', 'mcp'].includes(executionMode)) return reply.code(400).send({ code: 400, data: null, message: 'executionMode 仅 native|mcp' });
-        // native 的两种形态：host=SSH 直连（需 hostConn）；zabbix/rocketmq/nacos=HTTP API（需 url）。
-        // 其余 category 仍只能走 mcp（社区 MCP 子进程）。
-        const HTTP_NATIVE_CATEGORIES = ['zabbix', 'rocketmq', 'nacos'];
+        // native 的三种形态：host=SSH 直连（需 hostConn）；zabbix/rocketmq/nacos=HTTP API（需 url）；
+        // redis/kafka=长连接（需 url 或槽位里的地址）。其余 category 仍只能走 mcp（社区 MCP 子进程）。
+        const HTTP_NATIVE_CATEGORIES = ['zabbix', 'rocketmq', 'nacos', 'redis', 'kafka'];
         const isHttpNative = body.category !== undefined && HTTP_NATIVE_CATEGORIES.includes(body.category);
         if (executionMode === 'native' && body.category !== 'host' && !isHttpNative) {
           return reply.code(400).send({
@@ -574,7 +666,14 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         if (executionMode === 'native' && body.category === 'host' && (!body.hostConn?.host || !body.hostConn.username)) {
           return reply.code(400).send({ code: 400, data: null, message: '原生 SSH 资产需 hostConn{host, username}' });
         }
-        if (executionMode === 'native' && body.category !== 'host' && !body.url) {
+        // redis/kafka 的地址可以来自 url 或槽位，因此不强制 url（槽位优先，见 services/*Connection.ts）
+        const ADDRESS_OPTIONAL = ['redis', 'kafka'];
+        if (
+          executionMode === 'native' &&
+          body.category !== 'host' &&
+          !body.url &&
+          !(body.category !== undefined && ADDRESS_OPTIONAL.includes(body.category))
+        ) {
           return reply.code(400).send({ code: 400, data: null, message: `${body.category} 原生资产需 url（管理 API 地址）` });
         }
         if (executionMode === 'mcp' && !body.command && !body.url) {
@@ -607,11 +706,13 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         // ref.<凭证名>.<键名> 保存校验（引用存在 + 本人创建，ADR-028；fail-closed）
         const refErr = await validateRefs(db, p, { env: body.env, args: body.args, headers: body.headers });
         if (refErr) return reply.code(400).send({ code: 400, data: null, message: refErr });
-        // §5.6 SSRF：URL 资产保存时即校验（fail-closed；allow_private_network 默认 0）
+        // §5.6 SSRF：URL 资产保存时即校验（fail-closed；allow_private_network 默认 0）。
+        // 创建时允许显式开启私网：原实现硬编码 false，导致「市场 tab 能建内网原生资产、自定义表单不能建」
+        // 两条路径口径不一致（market.ts 的 instantiate 是读 body.allowPrivateNetwork 的）。
+        // 放宽的是**同一道闸门**的开关，不是取消校验——云元数据地址始终拒绝。
         if (body.url) {
           try {
-            // v1 默认 allow_private_network=0（fail-closed）；本条创建路径不允许私网（显式开启走 PATCH/批量）
-            await assertUrlAllowed(body.url, false);
+            await assertUrlAllowed(body.url, body.allowPrivateNetwork === true);
           } catch (err) {
             return reply.code(400).send({ code: 400, data: null, message: `SSRF 校验失败：${err instanceof SsrfError ? err.message : String(err)}` });
           }
@@ -673,6 +774,7 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
               url: body.url ?? null,
               headers: (body.headers && Object.keys(body.headers).length > 0 ? body.headers : null) as object | null,
               allowInsecureTls: body.allowInsecureTls === true,
+              allowPrivateNetwork: body.allowPrivateNetwork === true,
               credentialSlots: (body.credentialSlots ?? []) as never[],
               ownerId: p.userId,
               visibility: 'owner',

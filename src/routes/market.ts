@@ -189,27 +189,50 @@ export function makeMarketRoutes(deps: MarketDeps & { catalogEntries?: CatalogEn
         if ('error' in tagsNorm) return reply.code(400).send({ code: 400, data: null, message: tagsNorm.error });
 
         const isNativeEntry = entry.executionMode === 'native';
-        // 原生条目：无配置可展开，地址由用户填写（该品类产品的管理 API 地址随部署而变，不能写死在目录里）
+        // 原生条目：无配置可展开，地址由用户填写（该品类产品的管理 API 地址随部署而变，不能写死在目录里）。
+        // 例外：redis / kafka 的地址可完全来自槽位（REDIS_HOST+REDIS_PORT / KAFKA_BROKERS），
+        // 此时 url 可为空——与 services/{redis,kafka}Connection.ts 的解析优先级一致。
+        const ADDRESS_OPTIONAL = ['redis', 'kafka'];
+        const categoryOfEntry = entry.categories[0] ?? '';
+        const addressOptional = ADDRESS_OPTIONAL.includes(categoryOfEntry);
         if (isNativeEntry) {
           const url = (body.url ?? '').trim();
-          if (!url) {
+          if (!url && !addressOptional) {
             return reply.code(400).send({ code: 400, data: null, message: '该条目为平台内建工具，需填写管理 API 地址（URL）' });
           }
-          try {
-            await assertUrlAllowed(url, body.allowPrivateNetwork === true);
-          } catch (err) {
-            return reply.code(400).send({
-              code: 400,
-              data: null,
-              message: `SSRF 校验失败：${err instanceof SsrfError ? err.message : String(err)}。若该地址确在内网，勾选「允许私网访问」后重试。`,
-            });
+          if (!url && addressOptional) {
+            // 地址走槽位：必须至少有一个与地址相关的槽位被绑定/直填，否则建出来也连不上
+            const addrSlots = Object.keys(entry.slotLabels ?? {}).filter((k) =>
+              /HOST|PORT|BROKERS|ADDR|ADDRESS|URL/i.test(k),
+            );
+            const provided = addrSlots.some(
+              (k) => body.credentialRefs?.[k] || (body.inlineValues?.[k] ?? '').trim() !== '',
+            );
+            if (!provided) {
+              return reply.code(400).send({
+                code: 400,
+                data: null,
+                message: `该条目为平台内建工具：需填写管理 API 地址，或在槽位 ${addrSlots.join(' / ')} 中提供地址`,
+              });
+            }
+          }
+          if (url) {
+            try {
+              await assertUrlAllowed(url, body.allowPrivateNetwork === true);
+            } catch (err) {
+              return reply.code(400).send({
+                code: 400,
+                data: null,
+                message: `SSRF 校验失败：${err instanceof SsrfError ? err.message : String(err)}。若该地址确在内网，勾选「允许私网访问」后重试。`,
+              });
+            }
           }
         }
 
         const base = expandConfig(entry);
         const ov = body.config;
         const config = isNativeEntry
-          ? { command: '', args: [], env: {}, url: (body.url ?? '').trim(), headers: {} }
+          ? { command: '', args: [], env: {}, url: (body.url ?? '').trim() || null, headers: {} }
           : ov
             ? {
                 command: ov.command ?? base.command,

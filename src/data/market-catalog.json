@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "note": "v1 仅收录实测通过条目（2026-10-21 逐条跑 tools/list 校准；版本用 --from/pinned == 与 @x.y.z 固化）。13 条实测通过（AC-62 ≥12 已满足）。未收录（实测不可用）：mcp-server-sqlite/weather/nmap/everything（与 mcp SDK API 不兼容）、官方 npm server-fetch/git/sqlite/time（npm 已下架）、mcp-server-kubernetes/postgres（需 kubeconfig/DB URL 启动即退）、server-puppeteer（启动后 listTools 超时）。2026-11-05 修正：mysql-mcp-server 原固定 0.1.4 在 PyPI 不存在（可用 0.1.0/0.1.2/0.2.x/0.3.x/0.4.x），且 0.3.1 缺 dotenv 依赖、0.1.2 与新版 MCP SDK 不兼容（list_resources 缺失），实际可用版本为 0.4.5，已改固定；其余 12 条固定版本经 PyPI/npm registry 复核均存在。",
+  "note": "v1 仅收录实测通过条目（2026-10-21 逐条跑 tools/list 校准；版本用 --from/pinned == 与 @x.y.z 固化）。13 条实测通过（AC-62 ≥12 已满足）。未收录（实测不可用）：mcp-server-sqlite/weather/nmap/everything（与 mcp SDK API 不兼容）、官方 npm server-fetch/git/sqlite/time（npm 已下架）、mcp-server-kubernetes/postgres（需 kubeconfig/DB URL 启动即退）、server-puppeteer（启动后 listTools 超时）。2026-11-05 修正：mysql-mcp-server 原固定 0.1.4 在 PyPI 不存在（可用 0.1.0/0.1.2/0.2.x/0.3.x/0.4.x），且 0.3.1 缺 dotenv 依赖、0.1.2 与新版 MCP SDK 不兼容（list_resources 缺失），实际可用版本为 0.4.5，已改固定；其余 12 条固定版本经 PyPI/npm registry 复核均存在。 2026-11-23 新增 cr7258-elasticsearch-mcp-server（社区增强版，官方 @elastic/mcp-server-elasticsearch 已弃用）：多出写入类与 general_api_request 兜底工具。 2026-11-24 新增 redis-native / kafka-native 两条原生条目（ADR-036 落地：原生命令能力在 Market 里可直接选，不必走自定义表单）。",
   "items": [
     {
       "key": "baota-mcp-server",
@@ -157,6 +157,46 @@
             "ES_PATH_PREFIX": "",
             "ES_VERSION": "",
             "OTEL_LOG_LEVEL": "none"
+          }
+        }
+      }
+    },
+    {
+      "key": "cr7258-elasticsearch-mcp-server",
+      "name": "elasticsearch-mcp-server",
+      "displayName": "Elasticsearch MCP Server（cr7258 社区增强版）",
+      "description": "ES/OpenSearch 读写管理（28+ 工具）：除官方版的索引列举/映射/检索/分片外，另有 create_index、delete_index、delete_data_stream、delete_by_query、get_cluster_health/stats、别名增删、analyze_text，以及 general_api_request（任意 ES API 兜底）。ES 8.x 用本条目；7.x 改用 elasticsearch-mcp-server-es7、9.x 用 -es9。默认 VERIFY_CERTS=true（失败即拒绝）；自签证书集群需在创建时用 config 覆盖为 false。DISABLE_HIGH_RISK_OPERATIONS=true 可一次性隐藏全部写操作。",
+      "repository": "https://github.com/cr7258/elasticsearch-mcp-server",
+      "categories": [
+        "elasticsearch"
+      ],
+      "tags": [
+        "elasticsearch",
+        "es",
+        "opensearch"
+      ],
+      "runtime": "pypi",
+      "slotLabels": {
+        "ELASTICSEARCH_HOSTS": "集群地址（含协议与端口，如 https://es.example.com:9200）",
+        "ELASTICSEARCH_API_KEY": "API Key（推荐；与用户名/密码二选一）",
+        "ELASTICSEARCH_USERNAME": "用户名（与 API Key 二选一）",
+        "ELASTICSEARCH_PASSWORD": "密码（与 API Key 二选一）"
+      },
+      "defaultGroup": "elasticsearch",
+      "installations": {
+        "pypi": {
+          "command": "uvx",
+          "args": [
+            "elasticsearch-mcp-server==2.1.9"
+          ],
+          "env": {
+            "ELASTICSEARCH_HOSTS": "${ELASTICSEARCH_HOSTS}",
+            "ELASTICSEARCH_API_KEY": "${ELASTICSEARCH_API_KEY}",
+            "ELASTICSEARCH_USERNAME": "${ELASTICSEARCH_USERNAME}",
+            "ELASTICSEARCH_PASSWORD": "${ELASTICSEARCH_PASSWORD}",
+            "VERIFY_CERTS": "true",
+            "DISABLE_HIGH_RISK_OPERATIONS": "false",
+            "RESPONSE_FORMAT": "gcf"
           }
         }
       }
@@ -481,6 +521,60 @@
         "ROCKETMQ_TOKEN": "Bearer token（内网无鉴权可留空）"
       },
       "defaultGroup": "rocketmq",
+      "executionMode": "native",
+      "installations": {
+        "npm": {}
+      }
+    },
+    {
+      "key": "redis-native",
+      "name": "redis",
+      "displayName": "Redis（平台内建）",
+      "description": "平台内建 Redis 原生工具：执行原生命令（SLOWLOG / MEMORY USAGE / CLIENT LIST / CONFIG GET）、读取 INFO、查看慢查询。创建时填 Redis 地址（如 redis://host:6379/0，rediss:// 表示 TLS），密码填槽位 REDIS_PASSWORD。原生工具仅在 executionMode=native 时生效。",
+      "repository": "https://redis.io/docs/latest/commands/",
+      "categories": [
+        "redis"
+      ],
+      "tags": [
+        "redis",
+        "cache",
+        "kv"
+      ],
+      "runtime": "npm",
+      "slotLabels": {
+        "REDIS_PASSWORD": "Redis 密码（无认证可留空）",
+        "REDIS_HOST": "地址（可选；也可写在资产 url 里）",
+        "REDIS_PORT": "端口（可选，默认 6379）"
+      },
+      "defaultGroup": "redis",
+      "executionMode": "native",
+      "installations": {
+        "npm": {}
+      }
+    },
+    {
+      "key": "kafka-native",
+      "name": "kafka",
+      "displayName": "Kafka（平台内建）",
+      "description": "平台内建 Kafka 原生工具：主题列表 / 消费组堆积（lag）/ 管理动作（建删主题、扩分区、改配置、删消费组、重置位点）。创建时填 broker 地址（如 kafka://host:9092，多个用逗号分隔），需要 SASL 时填 KAFKA_SASL_USERNAME / PASSWORD。原生工具仅在 executionMode=native 时生效。",
+      "repository": "https://kafka.apache.org/documentation/",
+      "categories": [
+        "kafka"
+      ],
+      "tags": [
+        "kafka",
+        "mq",
+        "stream"
+      ],
+      "runtime": "npm",
+      "slotLabels": {
+        "KAFKA_BROKERS": "Broker 地址（可选；也可写在资产 url 里）",
+        "KAFKA_SASL_USERNAME": "SASL 用户名（无认证可留空）",
+        "KAFKA_SASL_PASSWORD": "SASL 密码（无认证可留空）",
+        "KAFKA_SASL_MECHANISM": "SASL 机制（plain / scram-sha-256 / scram-sha-512，默认 plain）",
+        "KAFKA_SSL": "是否启用 TLS（true / false）"
+      },
+      "defaultGroup": "kafka",
       "executionMode": "native",
       "installations": {
         "npm": {}

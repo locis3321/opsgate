@@ -20,7 +20,7 @@ const VIS_ALL: ComboOption = { value: '', label: '可见范围全部' };
 /** 枚举中文标签（技术值保留原样，运维需与配置/日志对照） */
 const TYPE_LABEL: Record<string, string> = { stdio: '本地进程', http: 'HTTP 服务', sse: 'SSE 服务', native: '原生直连' };
 const EXEC_LABEL: Record<string, string> = { native: '原生执行', mcp: 'MCP 实例' };
-const CATEGORY_LABEL: Record<string, string> = { host: '主机', mysql: 'MySQL', k8s: 'K8s', other: '其他', zabbix: 'Zabbix', rocketmq: 'RocketMQ', nacos: 'Nacos', mq: '消息队列', baota: '宝塔面板', monitor: '监控', elasticsearch: 'Elasticsearch' };
+const CATEGORY_LABEL: Record<string, string> = { host: '主机', mysql: 'MySQL', k8s: 'K8s', other: '其他', zabbix: 'Zabbix', rocketmq: 'RocketMQ', nacos: 'Nacos', redis: 'Redis', kafka: 'Kafka', mq: '消息队列', baota: '宝塔面板', monitor: '监控', elasticsearch: 'Elasticsearch', minio: 'MinIO' };
 
 /** 技术值 + 中文说明（mono 保留原值，便于对照配置） */
 function EnumTag({ value, labels }: { value: string; labels: Record<string, string> }) {
@@ -90,7 +90,7 @@ export default function Assets() {
 
   const q = useQuery({
     queryKey: ['assets', page, search, cat, type, exec, enabled, tag, visibility],
-    queryFn: () => api<{ items: Asset[]; total: number }>(
+    queryFn: () => api<{ items: Asset[]; total: number; categories?: string[] }>(
       `/api/v1/servers?page=${page}&search=${encodeURIComponent(search)}` +
       (cat ? `&category=${cat}` : '') + (type ? `&type=${type}` : '') + (exec ? `&executionMode=${exec}` : '') +
       (enabled ? `&enabled=${enabled}` : '') + (visibility ? `&visibility=${visibility}` : '') +
@@ -99,12 +99,17 @@ export default function Assets() {
   });
 
   const items = q.data?.items ?? [];
-  /** 品类筛选项从当页数据派生（加上当前选中的值，避免翻页后选中项消失） */
+  /**
+   * 品类筛选项由**后端**按全部可见资产派生（不是当页）。
+   * 原实现从当页 items 派生，导致「某品类没有资产或不在当前页 → 下拉里看不到」，
+   * 新建的原生品类（redis/kafka）在默认视图里根本不出现。
+   * 兼容旧响应：后端未返回 categories 时退回当页派生。
+   */
   const categories = useMemo(() => {
-    const set = new Set(items.map((a) => a.category).filter(Boolean));
+    const set = new Set<string>(q.data?.categories ?? items.map((a) => a.category).filter((c): c is string => Boolean(c)));
     if (cat) set.add(cat);
     return [...set].sort();
-  }, [items, cat]);
+  }, [q.data?.categories, items, cat]);
 
   /** 当页槽位状态（一次批量请求，替代每行 /slots 的 N+1） */
   const slotStatus = useQuery({

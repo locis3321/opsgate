@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Store, Terminal, Globe, Radio, Plus, ShieldAlert, KeyRound, FileKey } from 'lucide-react';
+import { Store, Terminal, Globe, Radio, Plus, ShieldAlert, KeyRound, FileKey, Zap } from 'lucide-react';
 import { api, ApiError } from '../api';
 import Modal from './Modal';
 import Tabs from './Tabs';
@@ -31,6 +31,63 @@ type Candidate = CredCandidate;
 
 type Protocol = 'stdio' | 'http' | 'sse';
 type Tab = 'market' | 'custom';
+/** 执行分层（ADR-022）：mcp = 代理社区实现走实例池；native = 网关进程内直连 */
+type ExecMode = 'mcp' | 'native';
+
+/**
+ * 原生资产支持哪些品类（与后端 `HTTP_NATIVE_CATEGORIES` 保持一致）。
+ *
+ * 为什么前端要维护这份清单：品类下拉若不区分，用户会以为「redis + mcp 模式」也能拿到原生工具，
+ * 但原生工具只在 `executionMode='native'` 时生效。这里同时驱动两件事——
+ * 下拉可选项、以及选了该品类后是否自动切到 native 模式。
+ */
+const NATIVE_CAPABLE = ['host', 'zabbix', 'rocketmq', 'nacos', 'redis', 'kafka'] as const;
+
+/** 各品类的原生连接信息：地址占位符 + 该品类需要的凭证槽位（槽位名与后端工具约定一致） */
+const NATIVE_PRESETS: Record<string, {
+  addrLabel: string;
+  addrPlaceholder: string;
+  addrHint: string;
+  slots: Array<{ name: string; label: string; file: boolean }>;
+}> = {
+  redis: {
+    addrLabel: 'Redis 地址',
+    addrPlaceholder: 'redis://redis.example.invalid:6379/0',
+    addrHint: '协议 rediss:// 表示 TLS；末尾 /0 是 db 编号。也可在槽位里分别给 host/port',
+    slots: [{ name: 'REDIS_PASSWORD', label: 'Redis 密码（无认证可留空）', file: false }],
+  },
+  kafka: {
+    addrLabel: 'Kafka Broker 地址',
+    addrPlaceholder: 'kafka://kafka.example.invalid:9092',
+    addrHint: '多个 broker 用逗号分隔，如 kafka://a:9092,b:9092。也可在槽位 KAFKA_BROKERS 填写',
+    slots: [
+      { name: 'KAFKA_SASL_USERNAME', label: 'SASL 用户名（无认证可留空）', file: false },
+      { name: 'KAFKA_SASL_PASSWORD', label: 'SASL 密码（无认证可留空）', file: false },
+    ],
+  },
+  zabbix: {
+    addrLabel: 'Zabbix 服务地址',
+    addrPlaceholder: 'http://zabbix.example.invalid:8080',
+    addrHint: 'Zabbix 前端地址（工具会自行调用 /api_jsonrpc.php）',
+    slots: [{ name: 'ZABBIX_TOKEN', label: 'Zabbix API Token', file: false }],
+  },
+  rocketmq: {
+    addrLabel: 'RocketMQ Dashboard 地址',
+    addrPlaceholder: 'http://rocketmq.example.invalid:8080',
+    addrHint: '必须是 Dashboard 的 HTTP 地址，不是 broker 的 9876 端口',
+    slots: [{ name: 'ROCKETMQ_TOKEN', label: 'Dashboard 访问令牌（无鉴权可留空）', file: false }],
+  },
+  nacos: {
+    addrLabel: 'Nacos 服务地址',
+    addrPlaceholder: 'http://nacos.example.invalid:8848',
+    addrHint: '填 Nacos 根地址（工具内部自动拼 /nacos/v1）',
+    slots: [
+      { name: 'NACOS_USERNAME', label: 'Nacos 用户名（无鉴权可留空）', file: false },
+      { name: 'NACOS_PASSWORD', label: 'Nacos 密码（无鉴权可留空）', file: false },
+      { name: 'NACOS_TOKEN', label: 'Nacos accessToken（可选，优先于用户名密码）', file: false },
+    ],
+  },
+};
 
 /** 市场 tab 里的内建工具：SSH 主机（网关内建 ssh2 直连，非社区 MCP） */
 const NATIVE_TOOL = '__native_ssh__';
@@ -62,6 +119,31 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
+/**
+ * 粗判地址是否为私网/环回（仅用于提示，**不是**安全校验）。
+ * 真正的 SSRF 判定在服务端（解析 DNS 后按 ipaddr.js 分类）；这里只为了让用户在保存前
+ * 就看到"要勾选允许私网访问"，避免提交后才收到 400。
+ */
+function isPrivateHost(raw: string): boolean {
+  const s = raw.trim();
+  if (!s) return false;
+  let host = '';
+  try {
+    host = new URL(s).hostname;
+  } catch {
+    return false;
+  }
+  if (!host) return false;
+  if (host === 'localhost') return true;
+  // IPv4 私网段：10/8、172.16/12、192.168/16、127/8、169.254/16
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  return false;
+}
+
 export default function AssetCreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
   const [tab, setTab] = useState<Tab>('market');
   const [marketTool, setMarketTool] = useState('');
@@ -87,6 +169,8 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
   // 自定义 MCP
   const [protocol, setProtocol] = useState<Protocol>('stdio');
   const [category, setCategory] = useState('other');
+  /** 执行模式：选到 redis/kafka 等原生品类时自动切 native（用户仍可改回 mcp） */
+  const [execMode, setExecMode] = useState<ExecMode>('mcp');
   const [command, setCommand] = useState('');
   const [argsRows, setArgsRows] = useState<string[]>([]);
   const [envRows, setEnvRows] = useState<Array<{ key: string; value: string }>>([]);
@@ -126,6 +210,15 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
   const marketSlots = useMemo(() => detail.data?.slots ?? [], [detail.data]);
   /** 目录条目本身是平台内建工具（executionMode=native），与内建 SSH 主机不是一回事 */
   const isNativeEntry = detail.data?.executionMode === 'native';
+  /**
+   * redis / kafka 的地址可以完全来自槽位（REDIS_HOST+REDIS_PORT / KAFKA_BROKERS），
+   * 因此这两类原生条目 url 可留空——与后端 market.ts 的 ADDRESS_OPTIONAL 判定一致。
+   */
+  const entryAddressOptional = useMemo(() => {
+    if (!isNativeEntry) return false;
+    const cats = (catalog.data?.items ?? []).find((it) => it.key === marketKey)?.categories ?? [];
+    return cats.some((c) => c === 'redis' || c === 'kafka');
+  }, [isNativeEntry, marketKey, catalog.data]);
 
   // 内建 SSH 主机的槽位：槽位名由系统固定，标签按"认证方式"直白呈现，用户无需理解 AUTH 这类内部名
   const nativeSlots = useMemo(() => {
@@ -147,12 +240,22 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
     return detectSlots({ env, args, headers });
   }, [envRows, argsRows, headersRows]);
 
-  const slots = tab === 'market' ? (isNativeTool ? nativeSlots : marketSlots) : customSlots;
+  /** 原生模式（自定义 tab）：槽位由品类预设给出，不看 env/args 占位符 */
+  const nativePreset = NATIVE_PRESETS[category];
+  const isCustomNative = tab === 'custom' && execMode === 'native';
+  const customNativeSlots = useMemo(
+    () => (nativePreset?.slots ?? []).map((s) => ({ target: 'env' as const, name: s.name, label: s.label, file: s.file })),
+    [nativePreset],
+  );
+
+  const slots = tab === 'market'
+    ? (isNativeTool ? nativeSlots : marketSlots)
+    : (isCustomNative ? customNativeSlots : customSlots);
 
   /** 明文密钥提示（T5-3）：配置里直接写死的敏感值会被明文落库，建议改用 ${SLOT} 占位符 */
   const plaintextHits = useMemo(() => {
     // 原生条目没有可扫描的配置（工具直连产品 API），不存在明文落库风险
-    if (isNativeTool || isNativeEntry) return [];
+    if (isNativeTool || isNativeEntry || isCustomNative) return [];
     const env = tab === 'custom'
       ? Object.fromEntries(envRows.filter((r) => r.key.trim()).map((r) => [r.key, r.value]))
       : (detail.data?.preview.env ?? {});
@@ -161,7 +264,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
       : (detail.data?.preview.headers ?? {});
     const args = tab === 'custom' ? argsRows.filter((r) => r.trim()) : (detail.data?.preview.args ?? []);
     return detectPlaintextSecrets({ env, args, headers });
-  }, [tab, envRows, headersRows, argsRows, detail.data, isNativeTool, isNativeEntry]);
+  }, [tab, envRows, headersRows, argsRows, detail.data, isNativeTool, isNativeEntry, isCustomNative]);
   /** 市场 tab 未选工具 / 内建主机未填认证槽位时无槽位可绑，不渲染凭证绑定区 */
   // 内建 SSH：凭证绑定区块**始终显示**——认证是必填事实，不该等用户先猜一个槽位名才露出来
   const showSlots = tab === 'custom' ? true : isNativeTool ? true : marketKey !== '';
@@ -219,17 +322,52 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
       if (tab === 'market') {
         if (!marketKey) throw new Error('请选择工具');
         const isNativeEntry = detail.data?.executionMode === 'native';
-        if (isNativeEntry && !url.trim()) throw new Error('该条目为平台内建工具，请填写管理 API 地址');
+        if (isNativeEntry && !url.trim() && !entryAddressOptional) {
+          throw new Error('该条目为平台内建工具，请填写管理 API 地址');
+        }
+        if (isNativeEntry && !url.trim() && entryAddressOptional) {
+          // 地址走槽位：必须有地址类槽位被绑定或直填，否则建出来也连不上
+          const addrSlotFilled = marketSlots.some(
+            (s) => /HOST|PORT|BROKERS|ADDR|ADDRESS|URL/i.test(s.name) && (bindings[s.name] || (slotValues[s.name] ?? '').trim() !== ''),
+          );
+          if (!addrSlotFilled) {
+            throw new Error('请填写管理 API 地址，或在下方「凭证绑定」中提供地址类槽位（如 REDIS_HOST / KAFKA_BROKERS）');
+          }
+        }
         const res = await instantiate.mutateAsync({
           pkgName: marketKey,
           name: name.trim(),
           displayName: displayName.trim() || undefined,
           credentialRefs: pickBindings(marketSlots.map((s) => s.name)),
           inlineValues: pickInlineValues(marketSlots.map((s) => s.name)),
-          ...(isNativeEntry ? { url: url.trim(), ...(allowPrivate ? { allowPrivateNetwork: true } : {}), ...(allowInsecureTls ? { allowInsecureTls: true } : {}) } : {}),
+          ...(isNativeEntry ? { ...(url.trim() ? { url: url.trim() } : {}), ...(allowPrivate ? { allowPrivateNetwork: true } : {}), ...(allowInsecureTls ? { allowInsecureTls: true } : {}) } : {}),
           ...(tags.length > 0 ? { tags } : {}),
         });
         onCreated(res.server.id);
+        return;
+      }
+
+      // 自定义 · 原生模式（ADR-022 分层：网关进程内直连，不起子进程）
+      // 适用 redis / kafka / zabbix / rocketmq / nacos —— 它们的运维能力由原生工具提供
+      if (tab === 'custom' && execMode === 'native') {
+        if (!nativePreset) throw new Error(`品类 "${category}" 不支持原生模式（可选：${NATIVE_CAPABLE.join(' / ')}）`);
+        if (!url.trim()) throw new Error(`${nativePreset.addrLabel}必填`);
+
+        const res = await create.mutateAsync({
+          name: name.trim(),
+          displayName: displayName.trim() || undefined,
+          type: 'native',
+          executionMode: 'native',
+          category,
+          url: url.trim(),
+          ...(allowPrivate ? { allowPrivateNetwork: true } : {}),
+          ...(allowInsecureTls ? { allowInsecureTls: true } : {}),
+          credentialSlots: customNativeSlots,
+          credentialBindings: pickBindings(customNativeSlots.map((s) => s.name)),
+          inlineValues: pickInlineValues(customNativeSlots.map((s) => s.name)),
+          ...(tags.length > 0 ? { tags } : {}),
+        });
+        onCreated(res.id);
         return;
       }
 
@@ -399,8 +537,15 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
           marketKey && detail.data && (
             detail.data.executionMode === 'native' ? (
               <Section title="连接信息">
-                <Field label="管理 API 地址" hint="平台内建工具：网关进程内直连，不起子进程。地址随部署而变，由你填写。">
-                  <input className="input mono" placeholder="如 http://zabbix.example:8080" value={url} onChange={(e) => setUrl(e.target.value)} />
+                <Field
+                  label={entryAddressOptional ? '管理 API 地址（可选）' : '管理 API 地址'}
+                  hint={
+                    entryAddressOptional
+                      ? '平台内建工具：网关进程内直连。此地址可留空——改为在下方「凭证绑定」填 REDIS_HOST + REDIS_PORT（或 KAFKA_BROKERS）。两者都填时以槽位为准。'
+                      : '平台内建工具：网关进程内直连，不起子进程。地址随部署而变，由你填写。'
+                  }
+                >
+                  <input className="input mono" placeholder={entryAddressOptional ? '可留空；或在下方槽位填 REDIS_HOST / KAFKA_BROKERS' : '如 http://zabbix.example:8080'} value={url} onChange={(e) => setUrl(e.target.value)} />
                 </Field>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
                   <input type="checkbox" checked={allowPrivate} onChange={(e) => setAllowPrivate(e.target.checked)} />
@@ -432,47 +577,108 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
         )
       ) : (
         <>
-          <Section title="协议">
+          <Section title="执行模式">
             <Tabs
               variant="segmented"
-              tabs={PROTOCOLS.map(({ value, label, icon: Icon }) => ({ value, label, icon: <Icon size={14} strokeWidth={1.8} /> }))}
-              value={protocol}
-              onChange={(v) => { setProtocol(v); setErr(''); }}
+              tabs={[
+                { value: 'mcp' as ExecMode, label: 'MCP 代理', icon: <Terminal size={14} strokeWidth={1.8} /> },
+                { value: 'native' as ExecMode, label: '原生直连', icon: <Zap size={14} strokeWidth={1.8} /> },
+              ]}
+              value={execMode}
+              onChange={(v) => { setExecMode(v); setErr(''); setBindings({}); setSlotValues({}); }}
             />
-            <div style={{ color: 'var(--meta)', fontSize: 12 }}>{PROTOCOLS.find((p) => p.value === protocol)?.hint}</div>
+            <div style={{ color: 'var(--meta)', fontSize: 12 }}>
+              {execMode === 'mcp'
+                ? '代理社区 MCP 实现：起子进程/连远端服务，走实例池。适合 mysql / k8s / 其他社区实现。'
+                : `网关进程内直连（不起子进程）：提供该品类的原生运维工具。仅支持 ${NATIVE_CAPABLE.join(' / ')}。`}
+            </div>
           </Section>
 
-          <Section title="连接配置">
-            {protocol === 'stdio' ? (
-              <>
-                <Field label="启动命令" hint="如 uvx / npx -y pkg@x.y.z">
-                  <input className="input" placeholder="uvx" value={command} onChange={(e) => setCommand(e.target.value)} />
-                </Field>
-                <StringListEditor label="参数（args）" hint="每个输入框为一个数组元素" value={argsRows} onChange={setArgsRows} />
-                <KVListEditor label="环境变量（env）" hint="值写 ${VAR} 占位符 → 自动识别为凭证槽位" value={envRows} onChange={setEnvRows} valuePlaceholder="${VAR} 或值" />
-              </>
-            ) : (
-              <>
-                <Field label="服务地址" hint="http = Streamable HTTP；sse = 旧式 SSE">
-                  <input className="input" placeholder="https://mcp.example.com/mcp" value={url} onChange={(e) => setUrl(e.target.value)} />
-                </Field>
-                <KVListEditor label="请求头（headers）" hint="值写 ${VAR} 占位符 → 自动识别为凭证槽位" value={headersRows} onChange={setHeadersRows} valuePlaceholder="Bearer ${API_KEY} 或值" />
-              </>
-            )}
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
-              <input type="checkbox" checked={allowInsecureTls} onChange={(e) => setAllowInsecureTls(e.target.checked)} />
-              允许不安全 TLS（目标用自签证书时勾选；关闭校验会失去中间人防护）
-            </label>
-            <Field label="业务品类" hint="决定安全规则的资产类型匹配维度；与分组无关，分组可自由创建与关联资产">
+          <Section title="业务品类">
+            <Field label="品类" hint="决定安全规则匹配维度与工具名前缀；与分组无关，分组可自由创建与关联资产">
               <Combobox
                 ariaLabel="业务品类"
                 value={category}
-                onChange={setCategory}
+                onChange={(v) => {
+                  setCategory(v);
+                  // 选到原生品类时自动切到 native（用户仍可手动改回），减少「以为有原生工具却拿到 mcp」的误配
+                  if ((NATIVE_CAPABLE as readonly string[]).includes(v) && v !== 'host') setExecMode('native');
+                  setErr('');
+                }}
                 placeholder="选择品类…"
-                options={[{ value: 'mysql', label: 'mysql' }, { value: 'k8s', label: 'k8s' }, { value: 'zabbix', label: 'zabbix' }, { value: 'rocketmq', label: 'rocketmq' }, { value: 'nacos', label: 'nacos' }, { value: 'other', label: 'other' }, { value: 'host', label: 'host' }]}
+                options={[
+                  { value: 'mysql', label: 'mysql' },
+                  { value: 'k8s', label: 'k8s' },
+                  { value: 'zabbix', label: 'zabbix' },
+                  { value: 'rocketmq', label: 'rocketmq' },
+                  { value: 'nacos', label: 'nacos' },
+                  { value: 'redis', label: 'redis' },
+                  { value: 'kafka', label: 'kafka' },
+                  { value: 'other', label: 'other' },
+                  { value: 'host', label: 'host' },
+                ]}
               />
             </Field>
           </Section>
+
+          {isCustomNative && nativePreset ? (
+            <Section title="连接信息">
+              <Field label={nativePreset.addrLabel} hint={nativePreset.addrHint}>
+                <input className="input mono" placeholder={nativePreset.addrPlaceholder} value={url} onChange={(e) => setUrl(e.target.value)} />
+              </Field>
+              {isPrivateHost(url) && (
+                <div style={{
+                  padding: '8px 10px', borderRadius: 'var(--r-md)', fontSize: 12, lineHeight: 1.6,
+                  background: 'var(--warn-soft)', border: '1px solid var(--security-warn-border)', color: 'var(--warn)',
+                }}>
+                  检测到内网地址：请勾选下方「允许私网访问」，否则保存会被 SSRF 校验拒绝。
+                </div>
+              )}
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
+                <input type="checkbox" checked={allowPrivate} onChange={(e) => setAllowPrivate(e.target.checked)} />
+                允许私网访问（内网地址必选；变更写治理审计）
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
+                <input type="checkbox" checked={allowInsecureTls} onChange={(e) => setAllowInsecureTls(e.target.checked)} />
+                允许不安全 TLS（自签证书；关闭证书校验会失去中间人防护）
+              </label>
+            </Section>
+          ) : (
+            <>
+              <Section title="协议">
+                <Tabs
+                  variant="segmented"
+                  tabs={PROTOCOLS.map(({ value, label, icon: Icon }) => ({ value, label, icon: <Icon size={14} strokeWidth={1.8} /> }))}
+                  value={protocol}
+                  onChange={(v) => { setProtocol(v); setErr(''); }}
+                />
+                <div style={{ color: 'var(--meta)', fontSize: 12 }}>{PROTOCOLS.find((p) => p.value === protocol)?.hint}</div>
+              </Section>
+
+              <Section title="连接配置">
+                {protocol === 'stdio' ? (
+                  <>
+                    <Field label="启动命令" hint="如 uvx / npx -y pkg@x.y.z">
+                      <input className="input" placeholder="uvx" value={command} onChange={(e) => setCommand(e.target.value)} />
+                    </Field>
+                    <StringListEditor label="参数（args）" hint="每个输入框为一个数组元素" value={argsRows} onChange={setArgsRows} />
+                    <KVListEditor label="环境变量（env）" hint="值写 ${VAR} 占位符 → 自动识别为凭证槽位" value={envRows} onChange={setEnvRows} valuePlaceholder="${VAR} 或值" />
+                  </>
+                ) : (
+                  <>
+                    <Field label="服务地址" hint="http = Streamable HTTP；sse = 旧式 SSE">
+                      <input className="input" placeholder="https://mcp.example.com/mcp" value={url} onChange={(e) => setUrl(e.target.value)} />
+                    </Field>
+                    <KVListEditor label="请求头（headers）" hint="值写 ${VAR} 占位符 → 自动识别为凭证槽位" value={headersRows} onChange={setHeadersRows} valuePlaceholder="Bearer ${API_KEY} 或值" />
+                  </>
+                )}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
+                  <input type="checkbox" checked={allowInsecureTls} onChange={(e) => setAllowInsecureTls(e.target.checked)} />
+                  允许不安全 TLS（目标用自签证书时勾选；关闭校验会失去中间人防护）
+                </label>
+              </Section>
+            </>
+          )}
         </>
       )}
 

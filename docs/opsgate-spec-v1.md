@@ -101,7 +101,7 @@
 | display_name / description | text | |
 | type | text | **传输协议**：`stdio`（子进程 stdio）\| `http`（Streamable HTTP）\| `sse`（旧式 SSE）\| **`native`**（原生执行，无子进程）。与 `category`（业务品类）正交：`category` 决定规则匹配维度，`type` 决定实例池 transport |
 | **execution_mode** | text | `native` \| `mcp`。`native` = 网关进程内直连（SSH/SFTP，§5.5.7）；`mcp` = 代理社区实现走实例池。**仅 `category='host'` 可为 `native`**，且为该品类的默认值 |
-| category | text | `host` \| `mysql` \| `k8s` \| `other`，来自 Market 模板品类；**仅**决定 `asset_type` 规则匹配维度，**不决定分组归属**（ADR-026：分组是自由组织单元） |
+| category | text | `host` \| `mysql` \| `k8s` \| `other` \| `zabbix` \| `rocketmq` \| `nacos` \| `redis` \| `kafka` …（**不设硬编码白名单**，只校验格式 `^[a-z][a-z0-9-]{0,31}$`）；**仅**决定 `asset_type` 规则匹配维度与工具名前缀，**不决定分组归属**（ADR-026）。`redis` / `kafka` 于 ADR-036 新增，仅用于新建 native 资产（存量 redis 仍是 `other`+mcp） |
 | **host_conn** | JSON nullable | 仅 `execution_mode='native'` 时有效：`{host, port:22, username, authSlot, jumpHostSlot?}`。`authSlot` 指向 `server_credentials` 中绑定 SSH 私钥/密码的槽位名（凭证模型完全复用，注入目标从"子进程 env"变为"`ssh2.connect()` 参数"） |
 | tags | JSON | 如 `["web","prod"]`，用于 MCP 端点 `?tag=` 二级收窄（§5.5） |
 | allow_private_network | integer | 默认 `0`（fail-closed），按资产显式开启，变更写治理审计（§5.6） |
@@ -918,8 +918,10 @@ agent                          OpsGate                         目标主机
 
 | 层 | 职责 | 数量关系 |
 |---|---|---|
-| **Connector**（协议） | 建立并池化到目标的连接、注入凭证、健康检查 | 少而稳定（ssh / sftp / http / db …） |
+| **Connector**（协议） | 建立并池化到目标的连接、注入凭证、健康检查 | 少而稳定（ssh / http / redis / kafka …） |
 | **Tool**（能力） | 用 connector handle 完成一个原子动作，定义 schema 与描述 | 多而演进 |
+
+**当前已注册的 connector（2026-11-23）**：`ssh`（原生 SSH/SFTP）、`zabbix` / `rocketmq` / `nacos`（HTTP API，共用 `createHttpConnector`）、`redis`（ioredis 长连接池）、`kafka`（kafkajs admin 复用）。Redis/Kafka 的池化语义与 HTTP 不同：**长连接 + idle TTL + `invalidate(assetId)` 真断开**，见 §5.9.10。
 
 两层正交带来两个不同的扩展成本：
 
@@ -1023,6 +1025,24 @@ interface NativeToolDefinition<H> {
 4. 工具把资产清单写进 description —— R2，漂移 + 越权泄露
 5. 工具把大文件内容塞进返回值 —— 应走 §5.5.7 临时入口
 6. 工具做破坏性动作却不声明 `risk:'destructive'` —— 规则引擎与前端警示都依赖这个声明
+
+#### 5.9.10 长连接 Connector 与 raw 工具策略（2026-11-23，ADR-036）
+
+**长连接 Connector（`redis` / `kafka`）** 与 HTTP Connector 的差异：
+
+| 维度 | HTTP（zabbix/rocketmq/nacos） | 长连接（redis/kafka） |
+|---|---|---|
+| 连接复用 | 不池化（`release`/`invalidate` 空操作） | **按 `assetId + 连接参数 + 凭证指纹` 分池** |
+| 空闲回收 | 无 | idle TTL（复用 `ssh_pool.idle_ttl_sec`） |
+| `invalidate(assetId)` | 空操作 | **真断开并删除 entry**（凭证轮换/槽位变更后重建） |
+| 并发模型 | 每请求一个 fetch | Redis 连接多路复用；Kafka admin 单例复用 |
+| 凭证位置 | 工具内用 `ctx.credentials` 构造头 | `resolveConnection(asset, userId)` 解密后建连，**不落地 env/argv** |
+
+**raw 工具的三条硬约束**（缺一不可）：
+
+1. **动作参数必须顶层扁平字符串** —— `redis_command.command` / `kafka_admin.action` / `zabbix_api_call.method` 都是 string 类型。guard_rules 的 `arg` 维度只展开值、不展开键名，藏在嵌套对象里等于开出无审计后门。
+2. **三者"raw"语义不同，不合并成一个通用工具**：Redis 是任意命令（靠 guard_rules + 危险清单二次确认）；Kafka 是 8 个具名动作枚举（不接受任意 AdminClient 方法）；Zabbix 是任意 JSON-RPC 方法但受**永久黑名单**约束（账号/权限/脚本类 27 个方法任何入口都不可调）。
+3. **危险动作强制 `confirm_dangerous: true`** —— 在审计里留下"调用方知道这是危险操作"的意图证据。
 
 ---
 
@@ -1272,7 +1292,7 @@ export function canCredential(
 **分组**：CRUD `/groups`、`/groups/:id/servers`、`/groups/:id/users`
 **审计**：`GET /audit?page=&userId=&serverId=&tool=&status=&risk=&from=&to=&scope=management|asset`、`GET /audit/stats?groupBy=asset|global&window=24h|7d|30d&assetId=`、`GET /audit/:id`、CSV 导出。`scope` 按**动作性质**划分日志范围：`management` = 治理类动作（可见性/凭证/分组/规则库/原生工具/系统设置），`asset` = 资产的具体操作（工具调用/传输/拦截/认证失败）；不用 `server_id` 判定（治理事件的主体占位符不统一）。列表直接返回写入时快照的 `username` 与 `server_name`（不给 id 片段）
 **规则库**：`GET|POST /guard-rules?kind=`、`PATCH|DELETE /guard-rules/:id`（`locked=1` 返回 403）、`POST /guard-rules/test`（输入样例文本，返回命中规则，用于调试正则）
-**运行时**：`GET /runtime/instances`、`GET /runtime/metrics`（Prometheus 文本）、`GET /runtime/ssh-connections`（原生连接池：活跃连接数 / 空闲 / 指纹校验失败）、`GET /runtime/transfer-staging`（暂存区占用 / 待清理数）
+**运行时**：`GET /runtime/instances`、`GET /runtime/metrics`（Prometheus 文本）、`GET /runtime/ssh-connections`（原生连接池：活跃连接数 / 空闲 / 指纹校验失败）、`GET /runtime/long-connections`（Redis/Kafka 长连接池：`active`/`idle`/`total`/`available`，ADR-036）、`GET /runtime/transfer-staging`（暂存区占用 / 待清理数）
 **原生主机**：`POST /servers/:id/ssh/trust-fingerprint`（连通性测试时采集并信任主机指纹，支持批量勾选）
 **系统设置（配置字典，admin-only）**：`GET /settings`（返回 `SETTINGS_SCHEMA` + 当前生效值 + 默认值 + 是否 pending 重启）、`PATCH /settings/:key`（`{value}`，类型/范围校验，write-ahead 审计）、`POST /settings/:key/reset`（恢复默认）、`GET /settings/pending-restart`（待重启生效项）
 
@@ -1449,7 +1469,7 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 
 ---
 
-## 9. 验收标准（78 条 EARS，重点摘录）
+## 9. 验收标准（83 条 EARS，重点摘录）
 
 1. **default-deny**：新增任一路由未声明 `accessMode` 时，编译不通过
 2. **default-deny**：注册清单外的 `public` 路由时，进程启动失败并打印违规路由
@@ -1535,6 +1555,11 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 76. **工具描述凭证可见性**（ADR-028）：派生工具描述列出「可用凭证：名称(私有/共享/等级)」；只含自己的绑定与他人 asset 绑定，他人 personal 不出现
 77. **资产编辑范围**（ADR-035）：`PATCH /servers/:id` 对 `category` / `executionMode` / `type` / `command` / `args` / `env` / `headers` 任一字段返回 **400 且 message 含"不可修改"**；请求若同时含合法字段与上述任一字段，**整批拒绝、合法字段也不落库**；`name` / `displayName` / `description` / `tags` / `hostConn` / `url` / 安全开关 / `visibility` / `credentialSlots` / `enabled` 照常可改（对照组证明拒绝不是一刀切）
 78. **资产编辑不产生隐式副作用**（ADR-035）：不可改字段被拒时，实例不被回收、不写 `asset_update` 审计、`updated_at` 不变
+79. **原生写工具风险分级**（ADR-036）：新增的写/破坏性原生工具必须声明 `risk: 'write' | 'destructive'`；`destructive` 工具的 description 必须含 "destructive" 与 "确认" 字样，否则启动 fail-fast
+80. **raw 工具的可审计性**（ADR-036）：`redis_command` / `kafka_admin` / `zabbix_api_call` 的动作参数（command / action / method）必须是**顶层扁平 string**；嵌套对象形态一律不合规（guard_rules 的 `arg` 维度扫不到）
+81. **Zabbix 永久黑名单**（ADR-036）：`user.update` / `user.login` / `script.execute` / `role.update` / `token.*` / `configuration.import` 等账号与脚本类方法，**任何入口（含 `zabbix_api_call`）都返回明确拒绝**；只读白名单与黑名单无交集
+82. **Redis/Kafka 连接池回收**（ADR-036）：`invalidate(assetId)` 后该资产的连接被真实断开并从池中移除；空闲超过 `ssh_pool.idle_ttl_sec` 的连接自动回收
+83. **长连接池可观测**（ADR-036）：`GET /runtime/long-connections` 返回 redis/kafka 的 `active`/`idle`/`total`/`available`；`/runtime/metrics` 暴露 `opsgate_{redis,kafka}_connections_{active,idle}`；未注册 connector 时返回结构完整（available=false），不得 404
 
 ---
 
@@ -1685,3 +1710,4 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 | **ADR-033** | **元工具 `opsgate_invoke` 定为默认调用路径**（用户 2026-11-18 拍板，起因：ADR-032 的 `select_scope` 依赖客户端消费 `notifications/tools/list_changed`，而 **opencode 2.2.6 Code Mode 在同一轮对话内只构建一次工具目录**——`select_scope` 后本轮 `tools.*` 仍是 5 个平台工具，跨轮 `--continue` 也不刷新；服务端协议层实测正常，故不能把"客户端会刷新"当作可用性前提）：① 平台工具从 5 个增到 **7 个**，新增 `opsgate_list_asset_tools({asset})` 与 `opsgate_invoke({asset, tool, args})`。② `opsgate_invoke` 的 `tool` 必须属于该资产**当前可用工具集**（与 `list_asset_tools` 共用同一份 `toolsOfAsset()`），否则 `-32601` —— **不新开任意透传口**，`tool_filters`/品类过滤/停用开关/槽位归因全部照常生效。③ `list_asset_tools` 返回的 schema **去掉 `asset` 参数**（已提升为元工具外层参数）。④ `opsgate_select_scope` **保留为可选优化**（支持 `list_changed` 的客户端可少一层嵌套），不删除。⑤ **取代 J3 的"元工具不做兼容保留"**：元工具现在是默认路径而非旁路。⑥ `dispatchDerived` 形参由 `ExposedTool` 收窄为 `toolRef: string`，两条入口共用同一派生链路 | §5.5.1、§5.5.6、§9 AC-36a、`src/services/toolAggregation.ts`（`toolsOfAsset`）、`src/services/mcpEndpoint.ts`（`listAssetTools`/`invokeOnAsset`）、`docs/adr-033.md` |
 | **ADR-034** | **同槽位多凭证的确定性择优**（用户 2026-11-19 拍板，起因：v1→v2 数据迁移后发现 73 个槽位存在多条绑定；`privileges` 回填前有 66 个槽位的取舍不确定，回填后仍有 7 个槽位候选凭证**权限等级相同**，旧实现仅按 `privileges` 排序，同分时结果取决于 SQLite 返回行序 —— 同一份数据在不同机器/不同查询计划下可能取到不同账号，属隐式不确定）：① 排序键改为三级：**权限等级**（沿用 ADR-028 §2.4 的 root→rw→wo→ro→无）→ **管理类账号优先**（凭证名或绑定用户名匹配 `root`/`admin`/`administrator`/`superuser`/`superadmin`，按词边界匹配，避免误命中 `rootfs` 之类）→ **`credentialId` 字典序**。② 该规则只影响「多条绑定都已经可选、现在要挑一条」的场景，**不改变** personal 优先于 asset 的层级，也不改变任何授权判定（`privileges` 仍是展示性元信息，ADR-028 §④ 不变）。③ 实现集中在 `pickBestBinding()`，`resolveSlotValues` 与 `slotCredentialKey` 共用，避免两处口径漂移。④ `src/credential-tiebreak.test.ts` 锁定行为：业务账号先插入时仍应取到 root 账号，且重复调用结果一致。⑤ **不为存量数据伪造等级**：同等级绑定的取舍一律由本规则确定，不靠改写 `privileges` 让排序"看起来对"。迁移数据实测（`verify-real-resolve.mjs`，用 `.60` 上真实 `CredentialService`）：7 处同等级槽位 **7/7 落到管理账号**（其中 3 处是绑定用户名=`root` 的 `k8s-vm` 凭证，按"凭证名或绑定用户名"判定为管理账号）。 | §4.3、§5.3 槽位取值、`src/services/credentials.ts`（`pickBestBinding`）、`src/credential-tiebreak.test.ts` |
 | **ADR-035** | **资产形态与执行配置创建后不可改**（用户 2026-11-21 纠正"编辑功能放太开了"）：① 新建资产时可调的只有**标签、凭证绑定、基础信息与名称**；编辑时同样只能改这些，外加**连接目标**（原生 host 的 `hostConn{host,port,username,authSlot,authPassSlot}`）与**安全开关**（`allowPrivateNetwork` / `allowInsecureTls`）——用户选择口径为"基础信息 + 连接目标"。② `PATCH /servers/:id` 对 `category` / `executionMode` / `type` / `command` / `args` / `env` / `headers` **显式 400 拒绝**，且**整批拒绝**（含合法字段的混合请求也不落库），不做静默忽略（静默忽略会让调用方以为改成功了）。③ **推翻 ADR 前序实现**：`79b5c56` 曾开放形态字段修改并做形态自洽矩阵校验，`a38ac69` 曾开放执行配置修改 —— 两者均回撤，`src/asset-shape-edit.integration.test.ts`（9 例）随之删除。④ UI 同步收敛：详情页「可见性」Tab 的标签/地址/私网/TLS 内联编辑全部移除，改为**只读展示 + 顶部「编辑」弹窗**，单一入口避免两处可写；TLS 开关按用户二次确认回到可见性 Tab（属资产级安全开关，非形态）。⑤ 建错形态的唯一路径是**重建资产**，不在旧资产上换形态 —— 换形态会让已绑槽位、已签发工具名（`{category}_{tool}`）与既有审计语义同时失效 | §4.1 字段、§7 `PATCH /servers/:id` 可改字段、§8.5 `/assets/:id`、§9 AC-77/78、`src/routes/assets.ts`（`immutable` 前置拒绝）、`frontend/src/components/AssetEditModal.tsx`、`src/asset-immutable-fields.integration.test.ts` |
+| **ADR-036** | **原生运维能力扩容 + raw 工具准入规则**（用户 2026-11-23 提出：ES 加 Market 条目 / nacos 加工具 / 扩 rocketmq / zabbix 加 raw 兜底 / redis+kafka 加原生 connector）：① **ES 走 Market 条目**（`cr7258-elasticsearch-mcp-server`，PyPI `elasticsearch-mcp-server==2.1.9`）而非原生 connector —— 它是社区 MCP 派生模型，官方 `@elastic` 版已弃用且只有 4 个只读工具。② **Redis/Kafka 走原生 connector**：现有 redis 资产是 `executionMode='mcp'` 且该字段受 ADR-035 冻结，**无法原地获得原生工具**；决策为**新增 `redis` / `kafka` 品类但不迁移存量**（存量 10 台 redis 保持 other+mcp，需要原生命令时新建 native 资产）。③ **Nacos/RocketMQ/Zabbix 扩原生工具**：新增 5+4+7 个工具，其中 zabbix 的「只读方法白名单」改造为**三层闸门**（只读白名单 / 永久黑名单 27 个账号与脚本类方法 / raw 需 confirm_dangerous）。④ **raw 工具四条准入规则**：动作参数必须顶层扁平 string（保证 guard_rules `arg` 维度可命中）；三者语义不合并（Redis 任意命令 / Kafka 8 动作枚举 / Zabbix 任意方法+黑名单）；危险动作强制 `confirm_dangerous: true`；默认启用（用户决策 D3）但危险动作二次确认是最后一道闸。⑤ **长连接 connector 池化**：按 `assetId + 连接参数 + 凭证指纹` 分池，复用 `ssh_pool.idle_ttl_sec` 做 idle 回收，`invalidate(assetId)` 真断开。**引入 `ioredis@6.1.0` + `kafkajs@2.2.4` 两个 runtime 依赖**（9→11） | §4.1 category、§5.9.1 Connector、§5.9.10 长连接与 raw 策略、§7 资产创建校验、§9 AC-79~83、`src/native/connectors/{redis,kafka}.ts`、`src/native/tools/{redis,kafka,nacos,rocketmq,zabbix}/`、`src/services/{redis,kafka}Connection.ts`、`src/data/market-catalog.json`、`src/native/httpTools.test.ts` |

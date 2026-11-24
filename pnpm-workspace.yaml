@@ -1,0 +1,2 @@
+minimumReleaseAgeExclude:
+  - ioredis@6.1.0

@@ -57,6 +57,21 @@ export default function Runtime() {
 
   const statEntries = Object.entries(instances.data?.stats ?? {}).filter(([k]) => k in STAT_META);
 
+  // 长连接池（Redis/Kafka）：有状态连接，active=有调用在用，idle=连接开着没人用（等 TTL 回收）
+  const longConn = useQuery({
+    queryKey: ['runtime-long-connections'],
+    queryFn: () => api<{
+      redis: { active: number; idle: number; total: number; available: boolean };
+      kafka: { active: number; idle: number; total: number; available: boolean };
+    }>('/api/v1/runtime/long-connections'),
+    refetchInterval: 5000,
+  });
+
+  const longPools = [
+    { key: 'redis', label: 'Redis', data: longConn.data?.redis },
+    { key: 'kafka', label: 'Kafka', data: longConn.data?.kafka },
+  ];
+
   return (
     <div className="page animate-slide-up">
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
@@ -184,6 +199,46 @@ export default function Runtime() {
               <div className="hint">实例将在首次工具调用时自动拉起</div>
             </div>
           )}
+
+          <div style={{ marginTop: 24 }}>
+            <h2 style={{ fontSize: 'var(--text-lg)', fontWeight: 600, marginBottom: 4 }}>长连接池</h2>
+            <p style={{ color: 'var(--muted)', margin: '0 0 12px', fontSize: 'var(--text-sm)' }}>
+              Redis / Kafka 为有状态长连接：活跃 = 正被调用使用，空闲 = 连接仍打开但无调用（到期自动回收）
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+              {longPools.map((p) => {
+                const available = p.data?.available !== false;
+                return (
+                  <div key={p.key} className="card" style={{ padding: 20 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                      <span style={{ fontWeight: 600, fontSize: 'var(--text-base)' }}>{p.label}</span>
+                      <span style={{ fontSize: 'var(--text-xs)', color: available ? 'var(--success)' : 'var(--muted)' }}>
+                        {available ? '已启用' : '未启用'}
+                      </span>
+                    </div>
+                    {available ? (
+                      <div style={{ display: 'flex', gap: 24 }}>
+                        {[
+                          { label: '活跃', value: p.data?.active ?? 0, color: 'var(--accent)' },
+                          { label: '空闲', value: p.data?.idle ?? 0, color: 'var(--warn)' },
+                          { label: '总计', value: p.data?.total ?? 0, color: 'var(--fg)' },
+                        ].map((it) => (
+                          <div key={it.label}>
+                            <div style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)', marginBottom: 2 }}>{it.label}</div>
+                            <div className="mono" style={{ fontSize: 'var(--text-xl)', fontWeight: 700, color: it.color, lineHeight: 1.1 }}>
+                              {it.value}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="hint" style={{ fontSize: 'var(--text-sm)' }}>该品类尚未注册连接器</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </>
       )}
     </div>

@@ -68,12 +68,16 @@ describe('目录数据（AC-62）', () => {
   it('目录条目数（AC-62：≥12）——2026-10-21 实测批次 13 条', () => {
     expect(loadCatalog().length).toBeGreaterThanOrEqual(12);
   });
-  it('内置目录 = 管理员整理后的 16 条（2026-11-19 固化，防止已删条目被重新种回）', () => {
+  it('内置目录 = 管理员整理后的 19 条（2026-11-24 固化，防止已删条目被重新种回）', () => {
     // 背景：管理员在管理端删掉 7 条（fetch/time/playwright/everything/filesystem/memory/
     // sequential-thinking）并新增 3 条（elasticsearch/minio×2）。种子文件若不同步，
     // 新环境首启会把删掉的重新种进去。此用例把这份人工决策固化为回归门禁。
+    // 2026-11-23：新增 cr7258-elasticsearch-mcp-server（官方 @elastic 版已弃用，社区版带写能力与 API 兜底）。
+    // 2026-11-24：新增 redis-native / kafka-native（原生工具在 Market 里可直接选，不必走自定义表单）。
     expect(loadCatalog().map((e) => e.key).sort()).toEqual([
       'baota-mcp-server',
+      'cr7258-elasticsearch-mcp-server',
+      'kafka-native',
       'kubernetes-mcp-server',
       'mcp-kafka',
       'mcp-server-docker',
@@ -87,6 +91,7 @@ describe('目录数据（AC-62）', () => {
       'prometheus-mcp-server',
       'rabbitmq-mcp-server',
       'redis-mcp-server',
+      'redis-native',
       'rocketmq-native',
       'zabbix-native',
     ]);
@@ -108,6 +113,8 @@ describe('目录数据（AC-62）', () => {
       'mcp-server-elasticsearch': '@elastic/mcp-server-elasticsearch@0.3.1',
       'minio-mcp-server': 'minio-mcp-server@0.1.0',
       'pickstar-2002-minio-mcp': '@pickstar-2002/minio-mcp@1.1.2',
+      // 2026-11-23 新增（PyPI 2.1.9 已复核；官方 @elastic 版已弃用）
+      'cr7258-elasticsearch-mcp-server': 'elasticsearch-mcp-server==2.1.9',
     };
     for (const e of loadCatalog()) {
       const inst = e.installations[e.runtime]!;

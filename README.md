@@ -327,15 +327,15 @@ src/
 ├── db/                     Drizzle schema, migrations, seed
 ├── framework/              Native tool contract and dispatch
 ├── native/
-│   ├── connectors/         ssh2 / HTTP connectors
-│   └── tools/              host / zabbix / rocketmq / nacos native tools
+│   ├── connectors/         ssh2 / HTTP / redis / kafka connectors
+│   └── tools/              host / zabbix / rocketmq / nacos / redis / kafka native tools
 ├── routes/                 REST routes (15 route modules)
 └── services/               Domain services (aggregation, instance pool, audit, credentials, policies…)
 frontend/
 └── src/pages/              18 admin console pages
 ```
 
-**Key technical decisions** (full records, including ADR-001 to ADR-035, are in `docs/opsgate-spec-v1.md` §10)
+**Key technical decisions** (full records, including ADR-001 to ADR-036, are in `docs/opsgate-spec-v1.md` §10)
 
 | Decision | Content |
 |---|---|
@@ -345,6 +345,7 @@ frontend/
 | ADR-032 | MCP single entry with layered exposure + `opsgate_select_scope` |
 | ADR-033 | Meta-tool `opsgate_invoke`, independent of client tool refresh |
 | ADR-035 | Asset shape and execution config are immutable after creation |
+| ADR-036 | Native ops capability expansion (Redis/Kafka connectors, raw tools) |
 
 ---
 
@@ -422,7 +423,7 @@ pnpm run seed                # write seed data (built-in rules, Market catalog)
 
 | Document | Contents |
 |---|---|
-| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | Authoritative design: data model, tool exposure, security constraints, API, acceptance criteria, and all architecture decision records (ADR-001 to ADR-035) in §10 |
+| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | Authoritative design: data model, tool exposure, security constraints, API, acceptance criteria, and all architecture decision records (ADR-001 to ADR-036) in §10 |
 | [`docs/deploy.md`](docs/deploy.md) | Deployment, backup, migration, known limitations |
 
 > The documents above are written in Chinese.

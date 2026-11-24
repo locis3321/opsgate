@@ -11,7 +11,7 @@ export type RiskLevel = 'read' | 'write' | 'destructive';
  * 新增品类（ES / Kafka / Prometheus / Baota / MinIO …）无需改代码即可用 `?category=` 收窄。
  * 本常量保留的唯一用途是给内置原生工具与默认分组提供类型边界，校验逻辑不得再引用它。
  */
-export const BUILTIN_CATEGORIES = ['host', 'mysql', 'k8s', 'other', 'zabbix', 'rocketmq', 'nacos'] as const;
+export const BUILTIN_CATEGORIES = ['host', 'mysql', 'k8s', 'other', 'zabbix', 'rocketmq', 'nacos', 'redis', 'kafka'] as const;
 export type BuiltinCategory = (typeof BUILTIN_CATEGORIES)[number];
 /** @deprecated 用 BUILTIN_CATEGORIES；保留别名避免一次性改动过大，校验处已改为动态品类 */
 export const TOOL_CATEGORIES = BUILTIN_CATEGORIES;
@@ -32,6 +32,8 @@ export const DEFAULT_GROUP_BY_CATEGORY: Partial<Record<ToolCategory, string>> = 
   zabbix: 'zabbix',
   rocketmq: 'rocketmq',
   nacos: 'nacos',
+  redis: 'redis',
+  kafka: 'kafka',
 };
 export type SlotTarget = 'env' | 'args' | 'headers';
 
