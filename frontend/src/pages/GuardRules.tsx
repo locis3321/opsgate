@@ -18,6 +18,8 @@ interface Rule {
   source: Source;
   /** 当前登录者能否改/停用/删除（管理员设的策略对成员为 false） */
   canManage: boolean;
+  /** 优先级（数值越大越优先） */
+  priority?: number;
 }
 interface Group { id: string; name: string; description: string | null }
 interface AssetItem { id: string; name: string; displayName: string | null; category: string; ownerId: string | null }
@@ -121,6 +123,32 @@ export default function GuardRules() {
   const toggle = useMutation({
     mutationFn: (r: Rule) => api(`/api/v1/guard-rules/${r.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !r.enabled }) }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['rules'] }),
+  });
+  // 编辑现有规则：只改 name / pattern / description / priority。
+  // kind（mark/block）与 scope 是规则的"形态"，改了等同换一条规则——应删除重建，故不开放编辑。
+  const [editing, setEditing] = useState<Rule | null>(null);
+  const [editForm, setEditForm] = useState({ name: '', pattern: '', description: '', priority: 500 });
+  const [editErr, setEditErr] = useState('');
+  const openEdit = (r: Rule) => {
+    setEditing(r);
+    setEditForm({ name: r.name, pattern: r.pattern, description: r.description ?? '', priority: r.priority ?? 500 });
+    setEditErr('');
+  };
+  const update = useMutation({
+    mutationFn: () => api(`/api/v1/guard-rules/${encodeURIComponent(editing!.id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        name: editForm.name.trim(),
+        pattern: editForm.pattern,
+        description: editForm.description,
+        priority: editForm.priority,
+      }),
+    }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['rules'] });
+      setEditing(null);
+    },
+    onError: (e: Error) => setEditErr(e.message),
   });
   const [confirmDel, setConfirmDel] = useState<Rule | null>(null);
   const del = useMutation({
@@ -331,13 +359,22 @@ export default function GuardRules() {
                 </td>
                 <td>
                   {r.canManage ? (
-                    <button
-                      className="btn btn-danger"
-                      style={{ padding: '2px 8px', fontSize: 12 }}
-                      onClick={() => setConfirmDel(r)}
-                    >
-                      删除
-                    </button>
+                    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                      <button
+                        className="btn"
+                        style={{ padding: '2px 8px', fontSize: 12 }}
+                        onClick={() => openEdit(r)}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        className="btn btn-danger"
+                        style={{ padding: '2px 8px', fontSize: 12 }}
+                        onClick={() => setConfirmDel(r)}
+                      >
+                        删除
+                      </button>
+                    </span>
                   ) : (
                     <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center', color: 'var(--meta)', fontSize: 12 }} title="该策略由管理员设置，你不能删除">
                       <Lock size={12} strokeWidth={1.8} /> 不可管理
@@ -391,6 +428,41 @@ export default function GuardRules() {
               onClick={() => del.mutate(confirmDel.id, { onSuccess: () => setConfirmDel(null) })}
             >
               {del.isPending ? '删除中…' : '确认删除'}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {editing && (
+        <Modal title="编辑安全规则" onClose={() => setEditing(null)}>
+          <div style={{ display: 'grid', gap: 12 }}>
+            <div style={{ color: 'var(--meta)', fontSize: 12, lineHeight: 1.7 }}>
+              规则「{editing.name}」 · {editing.kind === 'block' ? '拦截' : '标记风险'} · 匹配维度 {TARGET_LABELS[editing.target] ?? editing.target} · 作用域 {scopeText(editing)}
+              <br />
+              类型、匹配维度、作用域属规则形态，不能就地改（改动等同换一条规则）；如需调整请删除后重建。此处可改名称、正则、说明、优先级。
+            </div>
+            <label style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>规则名</span>
+              <input className="input" value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+            </label>
+            <label style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>正则（须线性无回溯）</span>
+              <input className="input mono" value={editForm.pattern} onChange={(e) => setEditForm({ ...editForm, pattern: e.target.value })} />
+            </label>
+            <label style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>说明</span>
+              <input className="input" value={editForm.description} onChange={(e) => setEditForm({ ...editForm, description: e.target.value })} placeholder="可选" />
+            </label>
+            <label style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>优先级（数值越大越优先）</span>
+              <input className="input mono" type="number" value={editForm.priority} onChange={(e) => setEditForm({ ...editForm, priority: Number(e.target.value) || 0 })} />
+            </label>
+            {editErr && <div style={{ color: 'var(--danger)', fontSize: 12 }}>{editErr}</div>}
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button className="btn" onClick={() => setEditing(null)}>取消</button>
+            <button className="btn btn-primary" disabled={update.isPending || editForm.name.trim() === '' || editForm.pattern.trim() === ''} onClick={() => update.mutate()}>
+              {update.isPending ? '保存中…' : '保存'}
             </button>
           </div>
         </Modal>

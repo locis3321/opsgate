@@ -1,0 +1,88 @@
+name: Release
+
+# 打 tag 触发发布：先跑质量门禁，再构建后端(dist)+前端(dist/frontend)，打成可部署的 tar.gz，
+# 最后创建 GitHub Release（含自动生成的源码包 + 构建产物）。tag 带 -alpha/-beta/-rc 时标记为 prerelease。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir frontend install --frozen-lockfile
+
+      # —— 质量门禁（与 ci.yml 同口径；发布前必须全绿）——
+      - name: Lint / Typecheck / Redlines / Test
+        run: |
+          pnpm run lint
+          pnpm run typecheck
+          pnpm run check:redlines
+          pnpm run test
+
+      # —— 构建 ——
+      - name: Build backend
+        run: pnpm run build
+
+      - name: Build frontend
+        run: pnpm --dir frontend run build
+
+      # —— 打包：dist（后端编译产物 + 迁移 + 前端静态）+ 运行所需清单 ——
+      - name: Package release tarball
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          OUT="opsgate-${VERSION}-linux-node22.tar.gz"
+          # 干净的制品目录：dist/ + package.json + lockfile + 部署文件
+          rm -rf _release && mkdir -p _release
+          cp -r dist _release/dist
+          cp package.json pnpm-lock.yaml Dockerfile docker-compose.yml .env.docker.example _release/ 2>/dev/null || true
+          cp README.md README.zh-CN.md _release/ 2>/dev/null || true
+          cp -r docs/opsgate-spec-v1.md docs/deploy.md _release/ 2>/dev/null || true
+          # 记录构建信息
+          {
+            echo "version=${VERSION}"
+            echo "commit=${GITHUB_SHA}"
+            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "node=22"
+          } > _release/BUILD_INFO.txt
+          tar -czf "${OUT}" -C _release .
+          echo "ASSET=${OUT}" >> "$GITHUB_ENV"
+          ls -lh "${OUT}"
+
+      # —— 创建 Release：prerelease 判定（含 -alpha/-beta/-rc）——
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: OpsGate ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          generate_release_notes: true
+          files: ${{ env.ASSET }}
+          body: |
+            Automated release for `${{ github.ref_name }}`.
+
+            **Asset**: `${{ env.ASSET }}` — prebuilt backend (`dist/`) + frontend static (`dist/frontend/`),
+            migrations, Dockerfile and deploy files. Requires Node.js 22 to run.
+
+            **Run from source tree**: `pnpm install --prod && node dist/server.js`
+            (see `docs/deploy.md` in the archive for env vars and data-dir setup).

@@ -153,7 +153,7 @@ Per-file limit is configurable (200 MB by default); staging quota and cleanup TT
 
 ### Market catalog
 
-16 preset templates (MySQL, K8s, Redis, Docker, Prometheus, RocketMQ, Kafka, Nacos, Zabbix, Baota panel, and more) that can be instantiated in one click. Entries follow a `draft` → `verified` → `disabled` state machine; administrators can create, edit, delete, run connectivity tests, and change status from the admin console.
+23 preset templates (MySQL, K8s, Redis, Docker, Prometheus, RocketMQ, Kafka, Nacos, Zabbix, Baota panel, and more) that can be instantiated in one click. Entries follow a `draft` → `verified` → `disabled` state machine; administrators can create, edit, delete, run connectivity tests, and change status from the admin console.
 
 ### Admin console
 
@@ -187,7 +187,7 @@ A React single-page app with 18 pages: a login page + 12 top-level pages (Overvi
 | Tailwind CSS | 4 | Styling (design-token driven) |
 | Vite | 6 | Build |
 
-**Tests**: Vitest 5 — 53 test files, 525 cases (517 passing, 8 skipped).
+**Tests**: Vitest 5 — 69 test files, 703 cases (689 passing, 14 skipped).
 
 ---
 
@@ -275,7 +275,7 @@ You can also initialize directly with a scope filter: `/mcp?category=host`, `/mc
 
 ### Runtime settings (L1)
 
-Adjustable from the console's "Runtime Settings" page: 26 items in 8 groups.
+Adjustable from the console's "Runtime Settings" page: 27 items in 8 groups.
 
 | Group | Representative items |
 |---|---|
@@ -332,7 +332,7 @@ src/
 ├── native/
 │   ├── connectors/         ssh2 / HTTP / redis / kafka connectors
 │   └── tools/              host / zabbix / rocketmq / nacos / redis / kafka native tools
-├── routes/                 REST routes (15 route modules)
+├── routes/                 REST routes (18 route modules)
 └── services/               Domain services (aggregation, instance pool, audit, credentials, policies…)
 frontend/
 └── src/pages/              18 admin console pages
@@ -441,7 +441,7 @@ pnpm run seed                # write seed data (built-in rules, Market catalog)
 - **Output truncation**: 4 KB by default, beyond which `truncated: true` is set; narrow the command yourself if you need the full content
 - **File transfer relies on the gateway's staging disk**: very large files must be transferred in batches
 - **Windows target hosts do not support native SSH execution**
-- **CLI assets (ADR-037)**: Linux only; binaries must be pre-installed on the host in this release (the gateway does not install them, so a container deployment needs its own derived image with kubectl / mysql / redis-cli installed); execution goes through a `bwrap` sandbox and is refused when `bwrap` is unavailable; the built-in CLI danger rules are seeded once (`.guard-rules-seeded`) so an upgraded database does not pick up newly added rules until an admin adds or re-seeds them
+- **CLI assets (ADR-037)**: Linux only; binaries must be pre-installed on the host in this release (the gateway does not install them, so a container deployment needs its own derived image with kubectl / mysql / redis-cli installed); execution goes through a `bwrap` sandbox and is refused when `bwrap` is unavailable; built-in guard rules are synced incrementally on startup (new rules added in code are seeded into an existing database, admin edits and deletions are preserved)
 - **Cross-month audit queries scan tables**: with partitioned tables, cross-month search has a performance ceiling
 - Bulk import (CSV) and bulk instantiation are v1.1 and not included in v1
 

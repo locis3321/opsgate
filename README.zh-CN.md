@@ -153,7 +153,7 @@ L1 采用**声明式 schema**：`src/config/settingsSchema.ts` 是唯一定义�
 
 ### Market 目录
 
-16 条预置模板（MySQL / K8s / Redis / Docker / Prometheus / RocketMQ / Kafka / Nacos / Zabbix / 宝塔 等），一键实例化。条目状态机 `draft` → `verified` → `disabled`，管理员可在后台增删改、连通性测试、状态变更。
+23 条预置模板（MySQL / K8s / Redis / Docker / Prometheus / RocketMQ / Kafka / Nacos / Zabbix / 宝塔 等），一键实例化。条目状态机 `draft` → `verified` → `disabled`，管理员可在后台增删改、连通性测试、状态变更。
 
 ### 管理端控制台
 
@@ -187,7 +187,7 @@ React 单页应用，18 个页面：登录页 + 12 个一级页面（概览、�
 | Tailwind CSS | 4 | 样式（设计令牌驱动） |
 | Vite | 6 | 构建 |
 
-**测试**：Vitest 5 — 53 个测试文件，525 个用例（517 通过 / 8 跳过）。
+**测试**：Vitest 5 — 69 个测试文件，703 个用例（689 通过 / 14 跳过）。
 
 ---
 
@@ -275,7 +275,7 @@ pnpm exec tsx src/server.ts
 
 ### 运行参数（L1）
 
-控制台「运行时参数」页可调，26 项，分 8 组：
+控制台「运行时参数」页可调，27 项，分 8 组：
 
 | 分组 | 代表项 |
 |---|---|
@@ -331,7 +331,7 @@ src/
 ├── native/
 │   ├── connectors/         ssh2 / HTTP / redis / kafka 连接器
 │   └── tools/              host / zabbix / rocketmq / nacos / redis / kafka 原生工具
-├── routes/                 REST 路由（15 个路由模块）
+├── routes/                 REST 路由（18 个路由模块）
 └── services/               领域服务（聚合、实例池、审计、凭证、策略…）
 frontend/
 └── src/pages/              18 个控制台页面
@@ -438,7 +438,7 @@ pnpm run seed                # 写入种子数据（内置规则、Market 目录
 - **输出截断**：default 4 KB，超出置 `truncated: true`；需要完整内容时自行收窄命令
 - **文件传输依赖网关暂存盘**：超大文件需分批
 - **Windows 目标主机不支持原生 SSH 执行**
-- **CLI 资产（ADR-037）**：仅 Linux；一期二进制需**主机预装**（网关不负责安装，容器部署需自建镜像并预装 kubectl / mysql / redis-cli 等）；执行经 `bwrap` 沙箱，bwrap 不可用即拒绝执行；内置 CLI 危险规则只播种一次（`.guard-rules-seeded`），存量库升级后需管理员手工补或显式重播种
+- **CLI 资产（ADR-037）**：仅 Linux；一期二进制需**主机预装**（网关不负责安装，容器部署需自建镜像并预装 kubectl / mysql / redis-cli 等）；执行经 `bwrap` 沙箱，bwrap 不可用即拒绝执行；内置安全规则启动时**增量同步**（代码新增的内置规则会自动补进存量库，管理员已修改或删除的保持不变）
 - **审计跨月查询按表扫描**：分表设计下跨月检索有性能上限
 - 批量导入（CSV）、批量实例化属 v1.1，未包含在 v1
 

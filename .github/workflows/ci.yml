@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [mcp-gateway-v1, feature/opsgate-v1-core]
+    branches: [main]
   pull_request:
 
 jobs:
