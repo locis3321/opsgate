@@ -18,13 +18,16 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - name: Install deps
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm --dir frontend install --frozen-lockfile
+      - name: Install backend deps
+        run: pnpm install --frozen-lockfile
+      - name: Install frontend deps
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm run check:redlines
       - run: pnpm run test
       - run: pnpm run build
-      - run: pnpm --dir frontend run build
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm run build

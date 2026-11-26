@@ -26,10 +26,12 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - name: Install
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm --dir frontend install --frozen-lockfile
+      - name: Install backend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
 
       # —— 质量门禁（与 ci.yml 同口径；发布前必须全绿）——
       - name: Lint / Typecheck / Redlines / Test
@@ -44,7 +46,8 @@ jobs:
         run: pnpm run build
 
       - name: Build frontend
-        run: pnpm --dir frontend run build
+        working-directory: frontend
+        run: pnpm run build
 
       # —— 打包：dist（后端编译产物 + 迁移 + 前端静态）+ 运行所需清单 ——
       - name: Package release tarball
