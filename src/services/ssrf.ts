@@ -39,7 +39,10 @@ export async function assertUrlAllowed(url: string, allowPrivateNetwork: boolean
   } catch {
     throw new SsrfError('URL 无法解析');
   }
-  const host = u.hostname;
+  // WHATWG URL 对 IPv6 主机返回带方括号的 hostname（如 "[::ffff:a9fe:a9fe]"），
+  // ipaddr.isValid 不认方括号——不剥掉会被误判为"域名"进而 lookup 失败/绕过 IP 判定。
+  const rawHost = u.hostname;
+  const host = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
   if (ipaddr.isValid(host)) {
     const normalized = normalizeAddr(host);
     if (isCloudMeta(normalized)) throw new SsrfError('云元数据地址禁止访问');
