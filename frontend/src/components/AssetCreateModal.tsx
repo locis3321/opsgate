@@ -1,38 +1,106 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Store, Terminal, Globe, Radio, Plus, ShieldAlert, KeyRound, FileKey, Zap } from 'lucide-react';
+import { Store, Terminal, Globe, Radio, Plus, Trash2, ShieldAlert, KeyRound, FileKey, Zap, SquareTerminal } from 'lucide-react';
 import { api, ApiError } from '../api';
 import Modal from './Modal';
 import Tabs from './Tabs';
 import Combobox from './Combobox';
 import TagEditor from './TagEditor';
 import SlotValueEditor, { type CredCandidate } from './SlotValueEditor';
-import { detectSlots, detectPlaintextSecrets } from '../slots';
+import { detectSlots, detectPlaintextSecrets, slotLabel } from '../slots';
 import { StringListEditor, KVListEditor } from './ConfigEditors';
 
 /**
- * 新建资产弹窗（§8.5）：三条创建路径统一入口。
+ * 新建资产弹窗（§8.5）：四条创建路径统一入口。
  * 1) 原生主机 —— category=host + executionMode=native（不走 Market，ADR-022）
  * 2) MCP 资产 —— 从 Market 目录选条目（自动展开配置 + 槽位识别 + 凭证绑定）
  * 3) MCP 资产 —— 自定义（协议 stdio/http/sse + 手填连接配置 + 槽位凭证绑定）
+ * 4) CLI 资产 —— executionMode=cli（网关本机一次性子进程，ADR-037）：
+ *    二进制 + 声明式 env 槽位 + 可选目标地址；形态复用 type=native（无 MCP 子进程包装）。
  *
  * 凭证绑定统一走槽位机制（`${NAME}` 占位符 → server_credentials）；
  * 也可在 env/args/headers 中直接写 `ref.<凭证名>.<键名>` 引用已有凭证（一个凭证可服务多个资产）。
  */
 
-interface CatalogItem { key: string; displayName: string; description: string; categories: string[]; runtime: string; executionMode?: 'mcp' | 'native' }
+interface CatalogItem { key: string; displayName: string; description: string; categories: string[]; runtime: string; executionMode?: 'mcp' | 'native' | 'cli' }
 interface CatalogDetail {
   key: string; displayName: string; description: string; runtime: string;
-  executionMode?: 'mcp' | 'native';
+  executionMode?: 'mcp' | 'native' | 'cli';
   preview: { command: string; args: string[]; env: Record<string, string>; url: string | null; headers: Record<string, string> };
+  /** CLI 条目的声明段（`executionMode='cli'` 时由后端随条目下发）：二进制与 env 模板 */
+  cli?: { bin: string; env?: Record<string, string>; urlEnv?: string };
   slots: Array<{ target: string; name: string; label: string; file: boolean }>;
 }
 type Candidate = CredCandidate;
 
 type Protocol = 'stdio' | 'http' | 'sse';
 type Tab = 'market' | 'custom';
-/** 执行分层（ADR-022）：mcp = 代理社区实现走实例池；native = 网关进程内直连 */
-type ExecMode = 'mcp' | 'native';
+/**
+ * 执行分层（ADR-022 / ADR-037）：mcp = 代理社区实现走实例池；native = 网关进程内直连；
+ * cli = 网关本机一次性子进程（argv 直执行，不经 shell，凭证只经 env/文件注入）。
+ */
+type ExecMode = 'mcp' | 'native' | 'cli';
+
+/** CLI 槽位行（声明式，不靠扫描 env 值推断）：env 名 + 是否落临时文件 */
+interface CliSlotRow { name: string; label: string; file: boolean }
+
+/**
+ * CLI 目标地址的唯一落点占位符。
+ *
+ * `url` 只有一条生效途径：CliRunner 渲染 env 模板时把 `${OPSGATE_TARGET}` 换成 asset.url。
+ * 所以「env 模板里是否出现这个占位」才是目标地址输入框该不该生效的判据——
+ * 没有它，收下的地址不会进任何变量，等于给用户一个不生效的字段。
+ * （与 Market 详情页 `cliTakesTarget` 同口径，两处必须一致。）
+ */
+const CLI_TARGET_PLACEHOLDER = 'OPSGATE_TARGET';
+
+/**
+ * CLI 槽位的文件类启发（与后端 `marketCatalog.ts` 的 `CLI_FILE_SLOT_RE` 同一份判据）。
+ *
+ * 只用于**未显式声明**的槽位（仅被 env 模板 `${NAME}` 引用的名字）：kubeconfig / 证书 / 私钥
+ * 这类值是文件内容，CliRunner 落 0600 临时文件后 env 只给路径；若错标成非文件，
+ * kubectl 拿到的是 kubeconfig 原文而不是路径——资产建成功、首次调用必失败。
+ * Market 条目入口也用这份启发，两条入口必须同口径，否则同一槽位在两边落库结果不同。
+ */
+const CLI_FILE_SLOT_RE = /KEY|KUBECONFIG|CERT|PEM/i;
+
+/**
+ * 由 env 模板 + 槽位行推导提交用的槽位声明。
+ *
+ * 两个来源都要合并：
+ * - 槽位行是**声明**：CliRunner 会按声明名直接注入 env（file:true 的落 0600 临时文件、
+ *   其余直接进 env），所以哪怕 env 模板里没写占位符，声明本身也是有效的注入点；
+ * - env 模板里的 `${NAME}` 是**模板渲染点**：模板引用了却没声明的名字，
+ *   执行时会因"槽位未绑定"直接 fail-closed，因此必须补进声明列表。
+ * 两者取并集：label/file 以槽位行为准；**只有**被 env 模板引用却没声明的名字才走
+ * `CLI_FILE_SLOT_RE` 启发补 `file`（显式声明过的槽位绝不被启发覆盖）。
+ * 目标地址占位（`${OPSGATE_TARGET}`）不是凭证槽位，跳过。
+ */
+function cliSlotsFromEnv(
+  envRows: Array<{ key: string; value: string }>,
+  slotRows: CliSlotRow[],
+): Array<{ target: 'env'; name: string; label: string; file: boolean }> {
+  const names: string[] = [];
+  const push = (raw: string) => {
+    const n = raw.trim();
+    // 空名字行不声明（槽位名是 env 名，空串既无法注入也会让后端拒绝）
+    if (!n || n === CLI_TARGET_PLACEHOLDER || names.includes(n)) return;
+    names.push(n);
+  };
+  for (const s of slotRows) push(s.name);
+  for (const r of envRows) {
+    for (const m of r.value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) push(m[1]!);
+  }
+  return names.map((name) => {
+    const declared = slotRows.find((s) => s.name.trim() === name);
+    return {
+      target: 'env' as const,
+      name,
+      label: declared?.label?.trim() || slotLabel(name),
+      file: declared ? declared.file : CLI_FILE_SLOT_RE.test(name),
+    };
+  });
+}
 
 /**
  * 原生资产支持哪些品类（与后端 `HTTP_NATIVE_CATEGORIES` 保持一致）。
@@ -119,10 +187,24 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
+/** 主机名维度的私网/环回判定（只吃 hostname，不做 URL 解析；http 与 CLI 两种地址形态共用） */
+function isPrivateHostname(host: string): boolean {
+  if (!host) return false;
+  if (host === 'localhost') return true;
+  // IPv4 私网段：10/8、172.16/12、192.168/16、127/8、169.254/16
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  return false;
+}
+
 /**
  * 粗判地址是否为私网/环回（仅用于提示，**不是**安全校验）。
  * 真正的 SSRF 判定在服务端（解析 DNS 后按 ipaddr.js 分类）；这里只为了让用户在保存前
  * 就看到"要勾选允许私网访问"，避免提交后才收到 400。
+ * 只适用于**带协议头的 URL**（native 的 http(s):// / redis:// 等）；CLI 的 host:port 走 `isPrivateCliHost`。
  */
 function isPrivateHost(raw: string): boolean {
   const s = raw.trim();
@@ -133,15 +215,89 @@ function isPrivateHost(raw: string): boolean {
   } catch {
     return false;
   }
-  if (!host) return false;
-  if (host === 'localhost') return true;
-  // IPv4 私网段：10/8、172.16/12、192.168/16、127/8、169.254/16
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (m) {
-    const [a, b] = [Number(m[1]), Number(m[2])];
-    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  return isPrivateHostname(host);
+}
+
+/**
+ * CLI 目标地址的私网提示（`host:port` 形态）。
+ *
+ * 不能直接复用 `isPrivateHost`：`new URL('10.0.0.5:3306')` 会把 `10.0.0.5:` 当成 scheme、
+ * hostname 变成空串（或整体抛错），于是内网地址的琥珀提示永远不出现——用户填完提交才被
+ * 后端 400 打回。归一化口径与服务端 `cliTargetForSsrf` 完全一致（无 `scheme://` 就补 `tcp://`），
+ * 否则前端提示与后端校验会对同一份输入给出不同结论。
+ */
+function isPrivateCliHost(target: string): boolean {
+  const s = target.trim();
+  if (!s) return false;
+  const probe = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s) ? s : `tcp://${s}`;
+  let host = '';
+  try {
+    host = new URL(probe).hostname;
+  } catch {
+    return false;
   }
-  return false;
+  return isPrivateHostname(host);
+}
+
+/**
+ * CLI 凭证槽位声明编辑器（env 名 + 是否落临时文件）。
+ *
+ * 与 MCP 的槽位不同：CLI 槽位不写在 env 值里靠扫描推断，而是**声明式**——
+ * `CliRunner` 直接按声明名把凭证注入同名环境变量；`file:true` 则写成 0600 临时文件、
+ * 环境变量只给路径（kubeconfig / 私钥这类必须是文件路径而不能是内容）。
+ */
+function CliSlotEditor({ value, onChange }: { value: CliSlotRow[]; onChange: (v: CliSlotRow[]) => void }) {
+  const setRow = (i: number, patch: Partial<CliSlotRow>) =>
+    onChange(value.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <div style={{ display: 'grid', gap: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+        <label style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)', fontWeight: 500 }}>凭证槽位</label>
+        <span style={{ color: 'var(--meta)', fontSize: 12 }}>名字即注入的环境变量名；勾「文件」表示写成临时文件、env 只给路径</span>
+      </div>
+      {value.map((row, i) => (
+        <div key={i} style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input
+            className="input mono"
+            style={{ flex: '2 1 160px', fontSize: 'var(--text-sm)' }}
+            placeholder="MYSQL_PWD"
+            aria-label={`槽位名 ${i + 1}`}
+            value={row.name}
+            onChange={(e) => setRow(i, { name: e.target.value })}
+          />
+          <input
+            className="input"
+            style={{ flex: '3 1 160px', fontSize: 'var(--text-sm)' }}
+            placeholder="展示用标签（可选，如 MySQL 密码）"
+            aria-label={`槽位标签 ${i + 1}`}
+            value={row.label}
+            onChange={(e) => setRow(i, { label: e.target.value })}
+          />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--muted)', fontSize: 'var(--text-xs)', whiteSpace: 'nowrap' }}>
+            <input type="checkbox" checked={row.file} onChange={(e) => setRow(i, { file: e.target.checked })} />
+            文件
+          </label>
+          <button
+            type="button"
+            className="btn"
+            style={{ padding: '4px 8px', flexShrink: 0 }}
+            title="删除该槽位声明"
+            onClick={() => onChange(value.filter((_, j) => j !== i))}
+          >
+            <Trash2 size={14} strokeWidth={1.8} />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="btn"
+        style={{ alignSelf: 'flex-start', fontSize: 'var(--text-xs)', gap: 4 }}
+        onClick={() => onChange([...value, { name: '', label: '', file: false }])}
+      >
+        <Plus size={12} strokeWidth={2} /> 添加槽位
+      </button>
+    </div>
+  );
 }
 
 export default function AssetCreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
@@ -176,6 +332,23 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
   const [envRows, setEnvRows] = useState<Array<{ key: string; value: string }>>([]);
   const [url, setUrl] = useState('');
   const [headersRows, setHeadersRows] = useState<Array<{ key: string; value: string }>>([]);
+  /**
+   * CLI 分支状态（executionMode='cli'）：
+   * - `cliCommand` 是二进制名/绝对路径（落 servers.command，后端创建时校验存在且可执行）
+   * - `cliEnvRows` 是 env **模板**，值里写 `${NAME}` 表示该变量由槽位 NAME 渲染
+   * - `cliSlotRows` 是槽位声明，仅用于标 `file:true`（kubeconfig/私钥这类要落临时文件）
+   * - `cliUrl` 落 servers.url，是否生效取决于 env 模板有没有 `${OPSGATE_TARGET}`
+   */
+  const [cliCommand, setCliCommand] = useState('');
+  const [cliEnvRows, setCliEnvRows] = useState<Array<{ key: string; value: string }>>([]);
+  const [cliSlotRows, setCliSlotRows] = useState<CliSlotRow[]>([]);
+  const [cliUrl, setCliUrl] = useState('');
+  /**
+   * 市场 tab 里 CLI 条目的目标地址（与自定义 CLI 的 `cliUrl` 分开存）。
+   * 两个 tab 的地址语义不同（条目声明 vs 用户自建模板），共用一个 state 会让切 tab 时
+   * 把另一边的值悄悄带过来——提交时就写进了不该有的 url。
+   */
+  const [marketCliUrl, setMarketCliUrl] = useState('');
   /** 目录条目为平台内建工具时的私网开关（内网部署必选，否则 SSRF fail-closed 拒绝保存） */
   const [allowPrivate, setAllowPrivate] = useState(false);
   const [allowInsecureTls, setAllowInsecureTls] = useState(false);
@@ -210,6 +383,28 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
   const marketSlots = useMemo(() => detail.data?.slots ?? [], [detail.data]);
   /** 目录条目本身是平台内建工具（executionMode=native），与内建 SSH 主机不是一回事 */
   const isNativeEntry = detail.data?.executionMode === 'native';
+  /**
+   * 目录条目是平台 CLI（executionMode='cli'，ADR-037）：二进制由条目声明、argv 直执行，
+   * 与社区 MCP 实现（起子进程/连远端）不是一回事——协议标签、说明与目标地址三类呈现都不同。
+   * Market 详情页（`isCli`）已区分，两处必须同口径，否则同一 entry 在两个入口显示不同事实。
+   */
+  const isCliEntry = detail.data?.executionMode === 'cli';
+  /**
+   * 该 CLI 条目的 env 模板是否承接资产 url（`${OPSGATE_TARGET}` → CliRunner 渲染为 asset.url）。
+   * 没承接的条目（kubectl 走 KUBECONFIG、kafka-topics 走 argv）不渲染目标地址输入框：
+   * 收了也没有落点，等于给用户一个不生效的字段（与 MarketDetail 的 `cliTakesTarget` 同判据）。
+   */
+  const cliEntryTakesTarget = useMemo(() => {
+    if (!isCliEntry) return false;
+    const env = detail.data?.cli?.env ?? detail.data?.preview.env ?? {};
+    return Object.values(env).some((v) => v.includes(`\${${CLI_TARGET_PLACEHOLDER}}`));
+  }, [isCliEntry, detail.data]);
+  /** CLI 条目承接目标地址的那个变量名（说明文案用，取不到时回落占位符名） */
+  const cliEntryTargetEnv = useMemo(() => {
+    if (!cliEntryTakesTarget) return CLI_TARGET_PLACEHOLDER;
+    const env = detail.data?.cli?.env ?? detail.data?.preview.env ?? {};
+    return Object.entries(env).find(([, v]) => v.includes(`\${${CLI_TARGET_PLACEHOLDER}}`))?.[0] ?? CLI_TARGET_PLACEHOLDER;
+  }, [cliEntryTakesTarget, detail.data]);
   /**
    * redis / kafka 的地址可以完全来自槽位（REDIS_HOST+REDIS_PORT / KAFKA_BROKERS），
    * 因此这两类原生条目 url 可留空——与后端 market.ts 的 ADDRESS_OPTIONAL 判定一致。
@@ -248,14 +443,39 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
     [nativePreset],
   );
 
+  /** CLI 模式（自定义 tab）：槽位 = 槽位声明 ∪ env 模板占位符（与提交口径同一份推导） */
+  const isCustomCli = tab === 'custom' && execMode === 'cli';
+  const customCliSlots = useMemo(() => cliSlotsFromEnv(cliEnvRows, cliSlotRows), [cliEnvRows, cliSlotRows]);
+  /**
+   * file 由启发式判定出来的槽位名（只被 env 模板引用、没有对应槽位声明）。
+   * 勾选状态是用户的动作，自动判定不是——不标出来用户会以为"我没勾文件，为什么显示文件"。
+   */
+  const customCliAutoFileSlots = useMemo(() => {
+    const declared = new Set(cliSlotRows.map((s) => s.name.trim()).filter((n) => n !== ''));
+    return new Set(customCliSlots.filter((s) => s.file && !declared.has(s.name)).map((s) => s.name));
+  }, [customCliSlots, cliSlotRows]);
+  /** env 模板是否承接 `${OPSGATE_TARGET}`：只有承接时目标地址才是有效字段 */
+  const cliTakesTarget = useMemo(
+    () => cliEnvRows.some((r) => r.value.includes(`\${${CLI_TARGET_PLACEHOLDER}}`)),
+    [cliEnvRows],
+  );
+
   const slots = tab === 'market'
     ? (isNativeTool ? nativeSlots : marketSlots)
-    : (isCustomNative ? customNativeSlots : customSlots);
+    : (isCustomCli ? customCliSlots : isCustomNative ? customNativeSlots : customSlots);
 
   /** 明文密钥提示（T5-3）：配置里直接写死的敏感值会被明文落库，建议改用 ${SLOT} 占位符 */
   const plaintextHits = useMemo(() => {
     // 原生条目没有可扫描的配置（工具直连产品 API），不存在明文落库风险
     if (isNativeTool || isNativeEntry || isCustomNative) return [];
+    // CLI 只有 env 模板可扫（argv 由调用方在调用时给，不在资产里）
+    if (isCustomCli) {
+      return detectPlaintextSecrets({
+        env: Object.fromEntries(cliEnvRows.filter((r) => r.key.trim()).map((r) => [r.key, r.value])),
+        args: [],
+        headers: {},
+      });
+    }
     const env = tab === 'custom'
       ? Object.fromEntries(envRows.filter((r) => r.key.trim()).map((r) => [r.key, r.value]))
       : (detail.data?.preview.env ?? {});
@@ -264,7 +484,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
       : (detail.data?.preview.headers ?? {});
     const args = tab === 'custom' ? argsRows.filter((r) => r.trim()) : (detail.data?.preview.args ?? []);
     return detectPlaintextSecrets({ env, args, headers });
-  }, [tab, envRows, headersRows, argsRows, detail.data, isNativeTool, isNativeEntry, isCustomNative]);
+  }, [tab, envRows, headersRows, argsRows, detail.data, isNativeTool, isNativeEntry, isCustomNative, isCustomCli, cliEnvRows]);
   /** 市场 tab 未选工具 / 内建主机未填认证槽位时无槽位可绑，不渲染凭证绑定区 */
   // 内建 SSH：凭证绑定区块**始终显示**——认证是必填事实，不该等用户先猜一个槽位名才露出来
   const showSlots = tab === 'custom' ? true : isNativeTool ? true : marketKey !== '';
@@ -283,6 +503,8 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
     marketTool || name.trim() || displayName.trim() || host.trim() || username.trim() || authSlot.trim()
     || command.trim() || url.trim() || argsRows.some((r) => r.trim())
     || envRows.some((r) => r.key.trim()) || headersRows.some((r) => r.key.trim())
+    || cliCommand.trim() || cliUrl.trim() || cliEnvRows.some((r) => r.key.trim())
+    || cliSlotRows.length > 0 || marketCliUrl.trim()
     || Object.keys(bindings).length > 0 || Object.values(slotValues).some((v) => v.trim())
     || tags.length > 0,
   );
@@ -322,6 +544,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
       if (tab === 'market') {
         if (!marketKey) throw new Error('请选择工具');
         const isNativeEntry = detail.data?.executionMode === 'native';
+        const isCliEntry = detail.data?.executionMode === 'cli';
         if (isNativeEntry && !url.trim() && !entryAddressOptional) {
           throw new Error('该条目为平台内建工具，请填写管理 API 地址');
         }
@@ -334,6 +557,12 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
             throw new Error('请填写管理 API 地址，或在下方「凭证绑定」中提供地址类槽位（如 REDIS_HOST / KAFKA_BROKERS）');
           }
         }
+        // CLI 条目：安装配置由条目声明（后端收到非空 config 会 400），只有目标地址可提交。
+        // 承接 `${OPSGATE_TARGET}` 的条目必须填地址——缺了它 env 里那个变量不会被渲染，
+        // 资产能建成但首次调用必然连不上（错误暴露得太晚）。
+        if (isCliEntry && cliEntryTakesTarget && !marketCliUrl.trim()) {
+          throw new Error(`该条目把 \${${CLI_TARGET_PLACEHOLDER}} 渲染进环境变量 ${cliEntryTargetEnv}，请填写目标地址（如 db.example.invalid:3306）`);
+        }
         const res = await instantiate.mutateAsync({
           pkgName: marketKey,
           name: name.trim(),
@@ -341,6 +570,8 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
           credentialRefs: pickBindings(marketSlots.map((s) => s.name)),
           inlineValues: pickInlineValues(marketSlots.map((s) => s.name)),
           ...(isNativeEntry ? { ...(url.trim() ? { url: url.trim() } : {}), ...(allowPrivate ? { allowPrivateNetwork: true } : {}), ...(allowInsecureTls ? { allowInsecureTls: true } : {}) } : {}),
+          // CLI 条目与原生条目共用 url 字段（D12 SSRF 闸门同一道）；地址与私网开关同批提交
+          ...(isCliEntry ? { ...(marketCliUrl.trim() ? { url: marketCliUrl.trim() } : {}), ...(allowPrivate ? { allowPrivateNetwork: true } : {}) } : {}),
           ...(tags.length > 0 ? { tags } : {}),
         });
         onCreated(res.server.id);
@@ -365,6 +596,52 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
           credentialSlots: customNativeSlots,
           credentialBindings: pickBindings(customNativeSlots.map((s) => s.name)),
           inlineValues: pickInlineValues(customNativeSlots.map((s) => s.name)),
+          ...(tags.length > 0 ? { tags } : {}),
+        });
+        onCreated(res.id);
+        return;
+      }
+
+      // 自定义 · CLI 模式（ADR-037）：网关本机一次性子进程，argv 直执行
+      // 形态复用 type='native'（后端硬约束：cli 的 type 若为 stdio/http/sse 会按 MCP 解析子进程/URL，
+      // 与 executionMode=cli 矛盾，直接 400）。
+      if (tab === 'custom' && execMode === 'cli') {
+        const bin = cliCommand.trim();
+        if (!bin) throw new Error('CLI 资产必须填写二进制（command），如 kubectl / mysql / redis-cli');
+        // 二进制存在性与可执行位由后端校验（which/绝对路径 + 普通文件判定）：缺失即 400，
+        // 前端不做本地探测——浏览器看不到网关主机的文件系统，猜出来的"可用"是假事实。
+        const cliSlots = cliSlotsFromEnv(cliEnvRows, cliSlotRows);
+        // 槽位名同时是 env 名与凭证文件名：CliRunner 执行前按标识符白名单校验，
+        // 这里前置同一判据——否则资产建成功、第一次调用才因槽位名非法失败（错误暴露得太晚）。
+        const badSlot = cliSlots.find((s) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(s.name));
+        if (badSlot) {
+          throw new Error(`槽位名 "${badSlot.name}" 非法：只允许字母或下划线开头，后接字母/数字/下划线（它同时是环境变量名）`);
+        }
+        const env = Object.fromEntries(cliEnvRows.filter((r) => r.key.trim()).map((r) => [r.key, r.value]));
+        // 地址只在 env 模板承接 `${OPSGATE_TARGET}` 时才提交：没有落点的地址不写库，
+        // 否则详情页会显示一个"填了但不生效"的目标。
+        const takeUrl = cliEnvRows.some((r) => r.value.includes(`\${${CLI_TARGET_PLACEHOLDER}}`));
+        if (takeUrl && !cliUrl.trim()) {
+          throw new Error(`env 模板承接了 \${${CLI_TARGET_PLACEHOLDER}}，请填写目标地址（如 db.example.invalid:3306）`);
+        }
+        // 反向：填了地址但模板没有承接点 —— 静默丢弃等于"看起来成功"（§2 原则 5），显式拒绝
+        if (!takeUrl && cliUrl.trim()) {
+          throw new Error(`目标地址需要一个落点：请在 env 模板里加一行承接 \${${CLI_TARGET_PLACEHOLDER}}（如 MYSQL_HOST = \${${CLI_TARGET_PLACEHOLDER}}），或清空地址后提交`);
+        }
+
+        const res = await create.mutateAsync({
+          name: name.trim(),
+          displayName: displayName.trim() || undefined,
+          type: 'native',
+          executionMode: 'cli',
+          category,
+          command: bin,
+          ...(Object.keys(env).length > 0 ? { env } : {}),
+          ...(takeUrl ? { url: cliUrl.trim() } : {}),
+          ...(allowPrivate ? { allowPrivateNetwork: true } : {}),
+          credentialSlots: cliSlots,
+          credentialBindings: pickBindings(cliSlots.map((s) => s.name)),
+          inlineValues: pickInlineValues(cliSlots.map((s) => s.name)),
           ...(tags.length > 0 ? { tags } : {}),
         });
         onCreated(res.id);
@@ -430,7 +707,9 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
     <Section title="凭证绑定">
       {slots.length === 0 ? (
         <div style={{ color: 'var(--meta)', fontSize: 'var(--text-sm)' }}>
-          未识别到凭证槽位。若服务需要认证，在配置里写 <code className="mono">{'${VAR}'}</code> 占位符即可自动识别为槽位。
+          {isCustomCli
+            ? <>当前没有声明凭证槽位。若 CLI 需要认证，在上方「凭证槽位」加一行（名字即注入的环境变量名），或在 env 模板值里写 <code className="mono">{'${VAR}'}</code> 自动识别。</>
+            : <>未识别到凭证槽位。若服务需要认证，在配置里写 <code className="mono">{'${VAR}'}</code> 占位符即可自动识别为槽位。</>}
         </div>
       ) : (
         <div style={{ display: 'grid', gap: 10 }}>
@@ -440,6 +719,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
               slotName={s.name}
               label={s.label}
               isFile={s.file}
+              note={isCustomCli && customCliAutoFileSlots.has(s.name) ? '自动判定为文件：该槽位只被 env 模板引用，值会写成 0600 临时文件、env 只给路径' : undefined}
               candidates={cands.data ?? []}
               value={slotValues[s.name] ?? ''}
               bound={boundInfo(s.name)}
@@ -475,7 +755,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
       />
 
       {tab === 'market' && (
-        <Field label="工具" hint="内建工具由网关直接实现；Market 条目由社区 MCP 实现，选中后自动展开配置并识别凭证槽位">
+        <Field label="工具" hint="内建工具由网关直接实现；平台 CLI 由网关本机二进制直执行；Market 条目由社区 MCP 实现，选中后自动展开配置并识别凭证槽位">
           <Combobox
             ariaLabel="选择工具"
             value={marketTool}
@@ -488,9 +768,13 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
               ...(catalog.data?.items ?? [])
                 .filter((it) => it.executionMode === 'native')
                 .map((it) => ({ value: it.key, label: it.displayName, hint: '内建', group: '内建' })),
+              // 「平台 CLI」= 网关本机二进制直执行（ADR-037）：与社区实现同样不是 MCP，单列一组
+              ...(catalog.data?.items ?? [])
+                .filter((it) => it.executionMode === 'cli')
+                .map((it) => ({ value: it.key, label: it.displayName, hint: 'CLI', group: '平台 CLI', icon: <SquareTerminal size={13} strokeWidth={1.8} /> })),
               // 「Market 目录」= 社区 MCP 实现（子进程/远端服务）
               ...(catalog.data?.items ?? [])
-                .filter((it) => it.executionMode !== 'native')
+                .filter((it) => it.executionMode !== 'native' && it.executionMode !== 'cli')
                 .map((it) => ({ value: it.key, label: it.displayName, hint: it.runtime, group: 'Market 目录' })),
             ]}
           />
@@ -557,6 +841,62 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
                 </label>
                 <div style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)', lineHeight: 1.6 }}>{detail.data.description}</div>
               </Section>
+            ) : detail.data.executionMode === 'cli' ? (
+              /* 平台 CLI（ADR-037）：不是 MCP 子进程，协议标签必须写 cli 而不是 stdio——
+                 stdio 会让用户以为有一个 MCP server 在起子进程。目标地址只在条目承接
+                 `${OPSGATE_TARGET}` 时才渲染（否则收了也无处落）。 */
+              <Section title="将生成的配置">
+                <div style={{ display: 'grid', gap: 6, fontSize: 'var(--text-sm)' }}>
+                  <div><span style={{ color: 'var(--meta)', marginRight: 8 }}>协议</span><span className="tag">cli</span></div>
+                  <div style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)', lineHeight: 1.6 }}>
+                    平台 CLI（argv 直执行）：网关本机以 <code className="mono">spawn</code> 直执行二进制，不经 shell，
+                    无实例池、无预热。调用时按元素传 argv。
+                  </div>
+                  {detail.data.cli?.bin && (
+                    <div className="mono" style={{ fontSize: 13, color: 'var(--fg-2)', wordBreak: 'break-all' }}>
+                      二进制：{detail.data.cli.bin}
+                    </div>
+                  )}
+                  {Object.keys(detail.data.cli?.env ?? {}).length > 0 && (
+                    <div style={{ color: 'var(--meta)', fontSize: 12 }}>
+                      注入环境变量：{Object.keys(detail.data.cli?.env ?? {}).join('、')}
+                    </div>
+                  )}
+                  {cliEntryTakesTarget ? (
+                    <Field
+                      label="目标地址"
+                      hint={`该地址会渲染进环境变量 ${cliEntryTargetEnv}，由 CLI 在调用时读取。`}
+                    >
+                      <input
+                        className="input mono"
+                        placeholder="db.example.invalid:3306"
+                        value={marketCliUrl}
+                        onChange={(e) => setMarketCliUrl(e.target.value)}
+                      />
+                    </Field>
+                  ) : (
+                    <div style={{ color: 'var(--meta)', fontSize: 12, lineHeight: 1.6 }}>
+                      该条目没有承接目标地址的环境变量：目标由 {detail.data.cli?.bin ?? 'CLI'} 自己的配置决定
+                      （如 KUBECONFIG）或在调用时由 argv 显式给出，此处无需填写地址。
+                    </div>
+                  )}
+                  {cliEntryTakesTarget && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
+                      <input type="checkbox" checked={allowPrivate} onChange={(e) => setAllowPrivate(e.target.checked)} />
+                      允许私网访问（内网地址必选；变更写治理审计）
+                    </label>
+                  )}
+                  {cliEntryTakesTarget && isPrivateCliHost(marketCliUrl) && !allowPrivate && (
+                    <div style={{
+                      padding: '8px 10px', borderRadius: 'var(--r-md)', fontSize: 12, lineHeight: 1.6,
+                      background: 'var(--warn-soft)', border: '1px solid var(--security-warn-border)', color: 'var(--warn)',
+                    }}>
+                      检测到内网地址：请勾选上方「允许私网访问」，否则保存会被 SSRF 校验拒绝。
+                    </div>
+                  )}
+                  <div style={{ color: 'var(--muted)' }}>{detail.data.description}</div>
+                </div>
+              </Section>
             ) : (
               <Section title="将生成的配置">
                 <div style={{ display: 'grid', gap: 6, fontSize: 'var(--text-sm)' }}>
@@ -583,6 +923,7 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
               tabs={[
                 { value: 'mcp' as ExecMode, label: 'MCP 代理', icon: <Terminal size={14} strokeWidth={1.8} /> },
                 { value: 'native' as ExecMode, label: '原生直连', icon: <Zap size={14} strokeWidth={1.8} /> },
+                { value: 'cli' as ExecMode, label: 'CLI', icon: <SquareTerminal size={14} strokeWidth={1.8} /> },
               ]}
               value={execMode}
               onChange={(v) => { setExecMode(v); setErr(''); setBindings({}); setSlotValues({}); }}
@@ -590,7 +931,9 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
             <div style={{ color: 'var(--meta)', fontSize: 12 }}>
               {execMode === 'mcp'
                 ? '代理社区 MCP 实现：起子进程/连远端服务，走实例池。适合 mysql / k8s / 其他社区实现。'
-                : `网关进程内直连（不起子进程）：提供该品类的原生运维工具。仅支持 ${NATIVE_CAPABLE.join(' / ')}。`}
+                : execMode === 'native'
+                  ? `网关进程内直连（不起子进程）：提供该品类的原生运维工具。仅支持 ${NATIVE_CAPABLE.join(' / ')}。`
+                  : 'CLI 子进程：在网关本机以 argv 直执行二进制（不经 shell，Linux 上经 bwrap 隔离），凭证只经环境变量/临时文件注入。二进制需主机预装。'}
             </div>
           </Section>
 
@@ -601,8 +944,10 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
                 value={category}
                 onChange={(v) => {
                   setCategory(v);
-                  // 选到原生品类时自动切到 native（用户仍可手动改回），减少「以为有原生工具却拿到 mcp」的误配
-                  if ((NATIVE_CAPABLE as readonly string[]).includes(v) && v !== 'host') setExecMode('native');
+                  // 选到原生品类时自动切到 native（用户仍可手动改回），减少「以为有原生工具却拿到 mcp」的误配。
+                  // CLI 模式不参与这条自动切换：k8s/redis/mysql 恰好都是 CLI 常见品类，
+                  // 一切就跳走会让用户无法用 CLI 建这些品类的资产。
+                  if (execMode !== 'cli' && (NATIVE_CAPABLE as readonly string[]).includes(v) && v !== 'host') setExecMode('native');
                   setErr('');
                 }}
                 placeholder="选择品类…"
@@ -621,7 +966,69 @@ export default function AssetCreateModal({ onClose, onCreated }: { onClose: () =
             </Field>
           </Section>
 
-          {isCustomNative && nativePreset ? (
+          {isCustomCli ? (
+            <>
+              <Section title="连接配置">
+                <Field
+                  label="二进制（command）"
+                  hint="二进制名（按网关 PATH 查找）或绝对路径。创建时会校验存在且可执行——一期要求主机预装，缺失即拒绝保存。"
+                >
+                  <input
+                    className="input mono"
+                    placeholder="kubectl"
+                    value={cliCommand}
+                    onChange={(e) => setCliCommand(e.target.value)}
+                  />
+                </Field>
+                <KVListEditor
+                  label="环境变量模板（env）"
+                  hint="值里写 ${NAME} 表示由槽位 NAME 注入；写 ${OPSGATE_TARGET} 表示注入下方目标地址"
+                  value={cliEnvRows}
+                  onChange={setCliEnvRows}
+                  valuePlaceholder="${MYSQL_PWD} 或字面值"
+                />
+                <CliSlotEditor value={cliSlotRows} onChange={setCliSlotRows} />
+              </Section>
+
+              <Section title="目标地址（可选）">
+                <Field
+                  label="目标地址"
+                  hint={
+                    cliTakesTarget
+                      ? '地址会被渲染进 env 模板里的 ${OPSGATE_TARGET}（如 MYSQL_HOST）。MySQL 作为主机；其它由 argv / kubeconfig 指定。'
+                      : '地址只有一条生效途径：env 模板里写 ${OPSGATE_TARGET}。当前模板没有这个占位符——请先在上方 env 加一行承接它（如 MYSQL_HOST = ${OPSGATE_TARGET}），否则这里填了也保存不了。'
+                  }
+                >
+                  <input
+                    className="input mono"
+                    placeholder="db.example.invalid:3306"
+                    value={cliUrl}
+                    onChange={(e) => setCliUrl(e.target.value)}
+                  />
+                </Field>
+                {cliUrl.trim() !== '' && !cliTakesTarget && (
+                  <div style={{
+                    padding: '8px 10px', borderRadius: 'var(--r-md)', fontSize: 12, lineHeight: 1.6,
+                    background: 'var(--warn-soft)', border: '1px solid var(--security-warn-border)', color: 'var(--warn)',
+                  }}>
+                    当前 env 模板没有承接 {'${OPSGATE_TARGET}'} 的变量，这个地址不会生效，提交会被拒绝。
+                  </div>
+                )}
+                {isPrivateCliHost(cliUrl) && (
+                  <div style={{
+                    padding: '8px 10px', borderRadius: 'var(--r-md)', fontSize: 12, lineHeight: 1.6,
+                    background: 'var(--warn-soft)', border: '1px solid var(--security-warn-border)', color: 'var(--warn)',
+                  }}>
+                    检测到内网地址：请勾选下方「允许私网访问」，否则保存会被 SSRF 校验拒绝。
+                  </div>
+                )}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
+                  <input type="checkbox" checked={allowPrivate} onChange={(e) => setAllowPrivate(e.target.checked)} />
+                  允许私网访问（内网地址必选；变更写治理审计）
+                </label>
+              </Section>
+            </>
+          ) : isCustomNative && nativePreset ? (
             <Section title="连接信息">
               <Field label={nativePreset.addrLabel} hint={nativePreset.addrHint}>
                 <input className="input mono" placeholder={nativePreset.addrPlaceholder} value={url} onChange={(e) => setUrl(e.target.value)} />

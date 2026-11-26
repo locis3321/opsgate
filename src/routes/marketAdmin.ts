@@ -19,6 +19,7 @@ import {
   entryExists,
   getEntryRaw,
   insertEntry,
+  rowToEntry,
   updateEntry,
   type MarketStatus,
 } from '../db/marketEntries.js';
@@ -176,22 +177,13 @@ function buildEntry(
 export function makeMarketAdminRoutes(deps: MarketAdminDeps): RouteDefinition[] {
   const { db, pool, audit, runtimeCredsDir } = deps;
 
-  /** market_entries 行 → CatalogEntry（probeEntry 与 verify 共用，避免两处映射漂移） */
+  /**
+   * market_entries 行 → CatalogEntry（probeEntry 与 verify 共用）。
+   * 直接复用 `rowToEntry`：cli 段、executionMode 三值等映射只存在于 DB 读取层一处，
+   * 否则管理端看到的是"丢了 cli 段、cli 被当成 mcp"的另一份形状（同一行两种语义）。
+   */
   function entryOfRow(row: NonNullable<ReturnType<typeof getEntryRaw>>): CatalogEntry {
-    return {
-      key: row.key,
-      name: row.name,
-      displayName: row.displayName,
-      description: row.description,
-      repository: row.repository,
-      categories: row.categories,
-      tags: row.tags,
-      runtime: row.runtime as CatalogEntry['runtime'],
-      ...(row.executionMode === 'native' ? { executionMode: 'native' as const } : {}),
-      ...(row.slotLabels ? { slotLabels: row.slotLabels } : {}),
-      ...(row.defaultGroup ? { defaultGroup: row.defaultGroup } : {}),
-      installations: row.installations as CatalogEntry['installations'],
-    };
+    return rowToEntry(row);
   }
 
   /**
@@ -210,6 +202,17 @@ export function makeMarketAdminRoutes(deps: MarketAdminDeps): RouteDefinition[] 
         tools: 0,
         slots: slots.map((s) => s.name),
         note: '平台内建工具：无子进程可探测。真实连通性请在资产详情页填写地址并绑定凭证后测试。',
+      };
+    }
+    // CLI 条目同样不该在这里拉起：`cli.bin`（kubectl/mysql/redis-cli）不是 MCP server，
+    // 拿它当子进程探测只会得到一条误导性的 listTools 失败。二进制存在性由实例化路径
+    // 复用 `cliCreateError` 校验（fail-closed），真实可用性在资产详情页执行时体现。
+    if (entry.executionMode === 'cli') {
+      return {
+        ok: true,
+        tools: 0,
+        slots: slots.map((s) => s.name),
+        note: 'CLI 条目：无 MCP 子进程可探测，二进制在实例化时校验是否存在于主机。',
       };
     }
     const config = expandConfig(entry);

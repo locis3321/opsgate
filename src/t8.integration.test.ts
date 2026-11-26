@@ -259,7 +259,7 @@ describe('T8：审计查询与统计', { timeout: 15_000 }, () => {
     // 清单必须包含资产/分组/规则等治理动作，否则 scope=asset 会混进管理操作
     for (const a of ['asset_create', 'remove_asset', 'asset_prewarm', 'asset_tool_filters',
       'group_change', 'update_group', 'delete_group', 'set_metadata', 'delete_metadata', 'remove_member',
-      'guard_rule_change', 'native_tool_toggle', 'system_setting',
+      'guard_rule_change', 'native_tool_toggle', 'system_setting', 'cli_create_denied',
       'visibility_change', 'credential_bind', 'credential_unbind', 'credential_rotate', 'credential_reveal']) {
       expect(GOVERNANCE_ACTIONS as readonly string[]).toContain(a);
     }

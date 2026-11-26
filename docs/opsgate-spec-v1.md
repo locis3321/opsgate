@@ -100,7 +100,7 @@
 | name | text unique | DNS-1123 子域规范，如 `web-mysql-01` |
 | display_name / description | text | |
 | type | text | **传输协议**：`stdio`（子进程 stdio）\| `http`（Streamable HTTP）\| `sse`（旧式 SSE）\| **`native`**（原生执行，无子进程）。与 `category`（业务品类）正交：`category` 决定规则匹配维度，`type` 决定实例池 transport |
-| **execution_mode** | text | `native` \| `mcp`。`native` = 网关进程内直连（SSH/SFTP，§5.5.7）；`mcp` = 代理社区实现走实例池。**仅 `category='host'` 可为 `native`**，且为该品类的默认值 |
+| **execution_mode** | text | `native` \| `mcp` \| `cli`。`native` = 网关进程内直连（SSH/SFTP，§5.5.7；亦含 zabbix/rocketmq/nacos/redis/kafka 的 HTTP/长连接内建工具）；`mcp` = 代理社区实现走实例池；`cli` = 网关本机一次性子进程直执行二进制（argv 不经 shell，ADR-037，§5.9.11）。`host` 品类默认为 `native`；`cli` 的 `type` 必须是 `native`（无子进程包装） |
 | category | text | `host` \| `mysql` \| `k8s` \| `other` \| `zabbix` \| `rocketmq` \| `nacos` \| `redis` \| `kafka` …（**不设硬编码白名单**，只校验格式 `^[a-z][a-z0-9-]{0,31}$`）；**仅**决定 `asset_type` 规则匹配维度与工具名前缀，**不决定分组归属**（ADR-026）。`redis` / `kafka` 于 ADR-036 新增，仅用于新建 native 资产（存量 redis 仍是 `other`+mcp） |
 | **host_conn** | JSON nullable | 仅 `execution_mode='native'` 时有效：`{host, port:22, username, authSlot, jumpHostSlot?}`。`authSlot` 指向 `server_credentials` 中绑定 SSH 私钥/密码的槽位名（凭证模型完全复用，注入目标从"子进程 env"变为"`ssh2.connect()` 参数"） |
 | tags | JSON | 如 `["web","prod"]`，用于 MCP 端点 `?tag=` 二级收窄（§5.5） |
@@ -121,6 +121,22 @@
 
 > **可编辑字段（ADR-035）**：`display_name` / `description` / `tags` / `host_conn` / `url` / `allow_private_network` / `allow_insecure_tls` / `visibility` / `shared_with_user_ids` / `credential_slots` / `enabled` / `name` 可改。
 > `type` / `execution_mode` / `category` / `command` / `args` / `env` / `headers` **创建后不可改**（`PATCH` 显式 400 整批拒绝）。形态与执行配置决定工具名前缀、策略作用域与实例计划，建错应重建资产。
+
+#### 4.1.1 `execution_mode='cli'` 的列语义（ADR-037）
+
+CLI 模式**不新增表、不新增列**：既有列在 cli 语义下恰好各就其位（D10）。同一列在两种模式下的含义必须分清，否则"`command` 既是 MCP 启动命令又是二进制路径"会让读代码的人把两条链路混成一条。
+
+| 列 | cli 模式下的语义 | 示例（占位值均无效） |
+|---|---|---|
+| `command` | **二进制名或绝对路径**（必填，缺失即 400）；**成员只能建白名单内的二进制**（`cli.member_allowed_binaries`，按 basename 比对，admin 不受限，不在白名单 → 403；403 留 `cli_create_denied` 审计）；落库前 `trim()`（与校验、白名单、spawn 用同一个值） | `kubectl` / `/usr/local/bin/kubectl` |
+| `args` | 固定前缀参数（本期恒为空，argv 全部来自调用方）；**创建时带非空 `args` 或非空 `headers` → 400**（不静默丢弃）。判据认"存在且非空"而**不只认数组**：`args:'--version'`、`args:{a:1}`、`headers:'Authorization'` 同样是 400（非数组形态本身即非法，且不得变成 500）；只有 `undefined`/`null`/`''`/`[]`/`{}` 视为未传 | `[]` |
+| `env` | 环境变量模板，支持 `${SLOT}` 与 `${OPSGATE_TARGET}` | `{"KUBECONFIG":"${KUBECONFIG}"}` |
+| `credential_slots` | `target:'env'` 的槽位声明；`file:true` 表示落 0600 临时文件（env 给路径） | `[{"target":"env","name":"KUBECONFIG","label":"kubeconfig","file":true}]` |
+| `url` | 目标地址，渲染进 `${OPSGATE_TARGET}`（`host[:port]` 或带协议 URL，按 cli 口径归一化后过 SSRF） | `db.example.invalid:3306` |
+| `type` | 固定 `native`（不是 `stdio`/`http`/`sse`，否则 400 —— 下游会按 MCP 传输解析 URL/子进程） | `native` |
+| `config_hash` | 照常参与配置比对（CLI 不进实例池，不参与实例键） | — |
+
+`credential_slots` 的**推荐取值**为**槽位行 ∪ `env` 模板占位符**的并集：`CliRunner` 有两条独立注入路径（按声明名直接注入 env / 按模板渲染 `${SLOT}`），只取一处会漏掉 `file:true` 标记或让模板引用的槽位无声明。该并集由前端新建表单与 Market 模板生成阶段构造；直连 `POST /servers` 的调用方需自行保证——只写 `${FOO}` 不声明槽位虽能落库，但执行时模板渲染会 fail-closed 报"槽位未绑定"。
 
 ### 4.2 credentials（凭证 = 创建者私有资源，可按分组共享使用）
 
@@ -1044,6 +1060,95 @@ interface NativeToolDefinition<H> {
 2. **三者"raw"语义不同，不合并成一个通用工具**：Redis 是任意命令（靠 guard_rules + 危险清单二次确认）；Kafka 是 8 个具名动作枚举（不接受任意 AdminClient 方法）；Zabbix 是任意 JSON-RPC 方法但受**永久黑名单**约束（账号/权限/脚本类 27 个方法任何入口都不可调）。
 3. **危险动作强制 `confirm_dangerous: true`** —— 在审计里留下"调用方知道这是危险操作"的意图证据。
 
+#### 5.9.11 CLI 资产执行（2026-11-25，ADR-037）
+
+第三种执行模式：资产声明一个**二进制**，调用方按元素给 `argv`，网关在本机起一次性子进程直执行。三处结构性差异决定了它必须自成一节，而不是并进 native 工具族：
+
+| 维度 | native（Connector×Tool） | cli（本小节） |
+|---|---|---|
+| 能力来源 | 代码注册的工具（`src/native/tools/<category>/`） | **资产自己声明的二进制**，工具只有一个 `${category}_run` |
+| 参数形状 | 每个工具自带 schema | 恒为 `{argv: string[]}`（唯一 schema，`src/services/cliTool.ts`） |
+| 执行体 | 进程内 connector（ssh2 / fetch / 长连接池） | `spawn(file, args, {shell:false})` 一次性进程 |
+| 生命周期 | 连接/实例可复用 | 一次调用一个进程，**不进实例池**（无 `ready` 态，池化只会制造假状态机，D9/D11） |
+
+**① argv 直执行，永不经 shell**
+
+- `execFile` 语义（`spawn` + `shell:false`）：`argv` 逐元素原样传给二进制，`;`、`$()`、`|`、反引号都是**字面量**，不存在 shell 解析面。
+- 约束：必须是非空字符串数组，空数组/含非字符串 → `-32602`（无意义调用不猜意图）。
+- 不做 shell 转义（因为没有 shell 可转义）；也不把 `argv` 拼成字符串再交给 shell —— 那正是 `host_execute_command` 的结构性缺陷（arg 维度只能对整串正则，无法命中单个 `--namespace prod`）。
+
+**② 工具名 `${category}_run`，且只暴露这一个**
+
+- 由品类确定性派生（`kubectl`/`mysql`/`redis-cli` 都按品类取名），不从二进制名派生（`kafka-topics.sh` 会产生非法工具名 `-` 与 `.`）。
+- 延续 ADR-021：同品类多个 CLI 资产共用同一套工具，靠 `asset` 入参区分。
+- **cli 工具不进 `tools/list`**：`aggregateTools` 只派生 mcp 资产的工具，CLI 资产只经元工具链（`opsgate_list_assets` → `opsgate_list_asset_tools` → `opsgate_invoke`）可见可调，避免裸 `/mcp` 的工具数随 CLI 资产数增长。
+
+**③ cli 分支必须置于 native 分支之前（防越权，硬约束）**
+
+`toolsOfAsset()`（发现）与 `invokeOnAsset()`（调用）原逻辑是"非 mcp 即 native"。若把 cli 判断写在 native 之后：
+
+```
+category=redis + execution_mode=cli 的资产
+  → 被判成"原生 redis 资产"
+  → 暴露并允许调用 redis_command / redis_info / redis_slowlog
+  → 走进程内 ioredis 连接执行，argv 校验形同虚设
+```
+
+这绕过的是"CLI 只能跑它自己配置的那个二进制"这条边界，属**越权**（同品类 ≠ 同执行方式）。两道互补防线：
+
+| 防线 | 位置 | 作用 |
+|---|---|---|
+| 分支顺序 | `toolsOfAsset` / `invokeOnAsset` 的 `if (row.executionMode === 'cli')` 置于 `!== 'mcp'` 之前 | 发现与调用都不把 CLI 资产当原生资产 |
+| 执行路径闸门 | `runGuarded({ rejectExecutionModes: ['cli'] })`（native 分派唯一收口点） | 元工具与旧会话快照都绕不过：**判定落在执行路径**，不只靠 `tools/list` 过滤 |
+
+闸门判定放在授权（`canInvoke`）之后、规则与审计之前：无权者仍只看统一的 `-32006`（不泄露"这台是 CLI 资产"），且"路径与资产不匹配"不是用户发起的调用，不留 `tool_call` 审计。
+
+**④ 凭证只经 env / 临时文件，绝不进 argv**
+
+- `file:true` 槽位写 `<dataDir>/runtime-creds/<runId>/<slot>`（目录 0700、文件 0600），env 值为路径；其余槽位直接进 env。
+- `env` 模板渲染：`${SLOT}` → 凭证值，`${OPSGATE_TARGET}` → `asset.url`。引用的槽位未绑定 → **抛错**（fail-closed），不渲染成空串（空串等于带着假凭证去连目标）。
+- 实现层**不做 `${SLOT}` → argv 的替换**：凭证在 argv 里就等于进了 `ps`、shell history 和审计原文。
+- 临时目录按 `runId` 隔离，成功/失败/超时/同步抛错四条路径都删；槽位名先过标识符白名单（`^[A-Za-z_][A-Za-z0-9_]*$`）再 `path.resolve` 后断言前缀落在 runDir 内（挡 `../`；不做 symlink 解析——runDir 由本进程 0700 新建且只含自有文件，无 symlink 面）。
+- 审计记 `argv` 全文（`audit: { fields: ['argv'], includeCommand: true }`），因凭证不在 argv 中，故无额外脱敏需求；仍过一遍既有 `redact`。
+
+**⑤ bwrap 沙箱：Linux 默认，不可用即 fail-closed**
+
+| bwrap 参数 | 作用 |
+|---|---|
+| `--ro-bind / /` | 根文件系统只读 |
+| `--tmpfs /run` + `--bind <credsDir> /run/cli-creds` | 仅暴露本次凭证；挂载点必须在 tmpfs 之上（顺序有语义） |
+| `--tmpfs <dataDir>` | 遮掉 `opsgate.db`、`credentials.key` 与仓库内其他凭证 |
+| `--tmpfs /tmp` + `--chdir /tmp` | 沙箱内可写工作目录（dataDir 下的宿主路径在沙箱内已不存在） |
+| `--dev /dev` / `--proc /proc` | 常规设备与进程视图 |
+| `--unshare-pid --unshare-ipc --unshare-uts` | 进程/IPC/UTS 隔离 |
+| `--die-with-parent` | 网关退出即回收 |
+| **不 `--unshare-net`** | 保留网络：kubectl/mysql 必须连目标服务 |
+
+- **bwrap 不可用**（非 Linux / 探测失败）→ 该资产**拒绝执行**并返回明确错误，**不降级裸跑**。`sandboxEnabled` 恒为要求态，可用性由 `isSandboxAvailable()` 单点判定并缓存。
+- **CLI 配置类错误走 `-32008`，不是 `-32002`**：`bwrap` 不可用 / `command` 缺失 / env 模板引用的槽位未绑定 / 槽位名非法都是**永久**错误，改参数重试不会自愈。`CliRunner` 抛 `CliConfigError`（`retryable=false`），`normalizeError` 只按显式类型把它映射到 `-32008` 并在 message 前缀「配置类错误（不可重试）」；其余 `-32002` 路径（实例忙/排队超时/未知错误）语义不变。落进 `-32002`（"缩小范围重试"）会让 agent 死循环重试。
+- 沙箱内 `file:true` 槽位的 env 值必须是 `/run/cli-creds/<slot>`（宿主路径在沙箱里不存在）；非沙箱模式才用宿主路径 —— 两条路径共用 `fileSlotEnv()` 纯函数推导。
+- 顺序硬约束：`--bind <credsDir>` 必须早于 `--tmpfs <dataDir>`（credsDir 位于 dataDir 内，先遮后绑会导致 bind 源不可解析）。
+- **`dataDir` / `runtimeCredsDir` 必须传绝对路径**：bwrap 参数里的 `--tmpfs <dataDir>` 与 `--bind <credsDir>` 都按**子进程 CWD** 解析；`dataDir` 默认值 `./data` 一旦原样传下去，`--tmpfs ./data` 遮的就不是网关数据目录（DB/凭证暴露，沙箱名存实亡）。`server.ts` 装配处 `path.resolve()` 后再交给 `CliRunner`。
+- 由此得到二期的部署硬约束：**二进制目录必须与 dataDir 物理分开**，否则 `--tmpfs <dataDir>` 会连二进制一起遮掉。
+
+**⑥ 门禁复用：`runGuarded` 合并 native + cli，derived 保留自身实现**
+
+三条路径原本各写一遍 `resolveAsset → canInvoke → evaluateRules → writeAuditIntent → fillAudit`；接第三条就会变成三份重复，且"新增执行路径忘记接策略"这类漏洞一旦发生就是全链路失效。裁决：
+
+| 路径 | 门禁实现 | 理由 |
+|---|---|---|
+| native | `runGuarded`（`src/framework/dispatchCore.ts`） | 合并，规则名 `native:<id>` |
+| **cli** | 同上 | 合并，规则名 `cli:<assetId>:<toolName>` |
+| derived | **保留 `dispatchDerived` 自身实现** | 会话快照 + 审计形状不同（`derived:<assetId>:<toolRef>` + 实例池 `acquire/release`），强行合并会让 `runGuarded` 长出"是否走实例池"的隐式开关（违反 §2 原则 1） |
+
+derived 的规则覆盖**不能靠合并保证**，改由**契约测试**（`src/framework/coverage.contract.test.ts`）守住：静态断言 `dispatchDerived` 内 `evaluateRules(` 早于 `pool.acquire(` —— 是 tripwire（防止删掉规则调用），**不**等于对每条路径跑了"无权/审计不可用/block"三组行为用例；新增执行路径若不接入门禁，需人工 review + 该 tripwire 共同兜。这是"用测试守边界"而非"用统一抽象拉平"。
+
+**⑦ 内置 CLI 危险规则（默认 mark，不 block）**
+
+既有 8 条规则的 `arg` 维度对 `FLUSHALL` / `--replicas=0` / `helm uninstall` / `mc rm --recursive` / `get secret` 全部漏判。追加 5 条（`gr-mark-cli-*`，priority 270–290，低于既有 mark 与 block），**全部 `kind=mark`**：命中只把审计 `risk` 升为 `high`，不阻断执行 —— 运维本来就要跑这些命令，阻断会让人绕过平台。管理员可在规则库自行改成 `block` 或删除。
+
+口径是 `argv` **逐元素**匹配（`stringValues` 递归展开字符串数组），不是整串拼接。因此规则只能锚定单 token：`get secret` 这种跨 token 语义无法表达，宁可多标记（`^secrets?$` 会对同名资源误报）不可漏标记。
+
 ---
 
 ## 5.10 配置管理：三层模型 + 配置字典（ADR-024）
@@ -1162,6 +1267,7 @@ interface NativeToolDefinition<H> {
 | `audit.retention_months` | 12 | 1–60 | ✅ |
 | `audit.arg_truncate_bytes` | 4096 | 512–65536 | ✅ |
 | `credentials.max_slots` | 32 | 1–64 | ✅ |
+| `cli.member_allowed_binaries` | `["kubectl","mysql","redis-cli","kafka-topics.sh","mc","jq"]` | — (json 列表) | ✅ |
 | `general.credential_user_warn_threshold` | 5 | 1–100 | ✅ |
 
 **留在 L2（代码常量，UI 不可改）**：占位符正则、敏感键启发式、脱敏 key 正则、加密格式 `v1.<iv>.<tag>.<ciphertext>`、实例键构成、错误码表、协议形状。这些是**契约**，改了就是改代码。
@@ -1292,7 +1398,11 @@ export function canCredential(
 **分组**：CRUD `/groups`、`/groups/:id/servers`、`/groups/:id/users`
 **审计**：`GET /audit?page=&userId=&serverId=&tool=&status=&risk=&from=&to=&scope=management|asset`、`GET /audit/stats?groupBy=asset|global&window=24h|7d|30d&assetId=`、`GET /audit/:id`、CSV 导出。`scope` 按**动作性质**划分日志范围：`management` = 治理类动作（可见性/凭证/分组/规则库/原生工具/系统设置），`asset` = 资产的具体操作（工具调用/传输/拦截/认证失败）；不用 `server_id` 判定（治理事件的主体占位符不统一）。列表直接返回写入时快照的 `username` 与 `server_name`（不给 id 片段）
 **规则库**：`GET|POST /guard-rules?kind=`、`PATCH|DELETE /guard-rules/:id`（`locked=1` 返回 403）、`POST /guard-rules/test`（输入样例文本，返回命中规则，用于调试正则）
-**运行时**：`GET /runtime/instances`、`GET /runtime/metrics`（Prometheus 文本）、`GET /runtime/ssh-connections`（原生连接池：活跃连接数 / 空闲 / 指纹校验失败）、`GET /runtime/long-connections`（Redis/Kafka 长连接池：`active`/`idle`/`total`/`available`，ADR-036）、`GET /runtime/transfer-staging`（暂存区占用 / 待清理数）
+**运行时**：`GET /runtime/instances`、`GET /runtime/metrics`（Prometheus 文本）、`GET /runtime/ssh-connections`（原生连接池：活跃连接数 / 空闲 / 指纹校验失败）、`GET /runtime/long-connections`（Redis/Kafka 长连接池：`active`/`idle`/`total`/`available`，ADR-036）、`GET /runtime/transfer-staging`（暂存区占用 / 待清理数）、**`GET /runtime/cli`**（CLI 在飞执行 + 计数 + 全部 CLI 资产健康，ADR-037）、**`DELETE /runtime/cli/:runId`**（强制终止一次 CLI 执行，写 `runtime_cli_kill` 治理审计）
+
+> **`GET /runtime/cli`**（admin）：`{available, runs, stats, health}`。`available` 是执行器装配状态的唯一事实来源 —— 空 `runs`/`stats` 与"装配了但零在飞"同形，只靠形状无法区分（与 `/runtime/long-connections` 同口径）。`runs` = 在飞清单 `{runId, assetId, pid, argvSummary, userId, startedAt, sandboxed}`；`stats` = `{active, total}`；`health` 覆盖**全部** `execution_mode='cli'` 资产（不只是在飞的），当前产出 `healthy` / `bin-missing` / `not-executable` / `sandbox-unavailable` 四态（类型另预留 `slots-unbound`，槽位绑定情况由 `opsgate_view_asset` 的 `unboundSlots` 回答）—— 只报在飞进程等于只在出事时才有信号。
+> **`DELETE /runtime/cli/:runId`**（admin）：tree-kill 整棵进程树（SIGTERM → 宽限后 SIGKILL），与关 MCP 实例同口径；runId 不在在飞登记 → **404**（不回 `killed:false` + 200，"以为杀掉了"与"确实杀掉了"必须可区分）。指标：`opsgate_cli_executions_active`（gauge）、`opsgate_cli_executions_total`（counter，成功/失败/超时明细的 result label 留二期）。
+
 **原生主机**：`POST /servers/:id/ssh/trust-fingerprint`（连通性测试时采集并信任主机指纹，支持批量勾选）
 **系统设置（配置字典，admin-only）**：`GET /settings`（返回 `SETTINGS_SCHEMA` + 当前生效值 + 默认值 + 是否 pending 重启）、`PATCH /settings/:key`（`{value}`，类型/范围校验，write-ahead 审计）、`POST /settings/:key/reset`（恢复默认）、`GET /settings/pending-restart`（待重启生效项）
 
@@ -1469,7 +1579,7 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 
 ---
 
-## 9. 验收标准（83 条 EARS，重点摘录）
+## 9. 验收标准（90 条 EARS，重点摘录）
 
 1. **default-deny**：新增任一路由未声明 `accessMode` 时，编译不通过
 2. **default-deny**：注册清单外的 `public` 路由时，进程启动失败并打印违规路由
@@ -1487,7 +1597,7 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 14. **审计保留**：12 个月内记录可检索，超期归档
 15. **规则库**：`locked=1` 的内置拦截规则，通过任何 API 路径修改/删除均返回 403
 16. **规则库**：提交含嵌套量词或回溯引用的正则时，保存接口返回 400 并说明 ReDoS 风险
-17. **规则库**：命中标规则的请求，审计记录中 `risk=high` 且展开区显示命中的规则名
+17. **规则库**：命中标记（mark）规则的请求，审计记录 `risk=high`（审计表无"命中规则"列，不展开规则名，只记录入参与 risk 等级）
 18. **规则库**：被 `kind=block` 规则拒绝的调用，同样先写 intent（status='blocked'）再返回 -32004
 19. **工具暴露**：`tools/list` 超过 200 个工具时返回 -32005，不静默截断
 20. **SSRF**：`allow_private_network=0` 的资产访问私网地址时，连接在建立前被拒绝
@@ -1560,6 +1670,13 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 81. **Zabbix 永久黑名单**（ADR-036）：`user.update` / `user.login` / `script.execute` / `role.update` / `token.*` / `configuration.import` 等账号与脚本类方法，**任何入口（含 `zabbix_api_call`）都返回明确拒绝**；只读白名单与黑名单无交集
 82. **Redis/Kafka 连接池回收**（ADR-036）：`invalidate(assetId)` 后该资产的连接被真实断开并从池中移除；空闲超过 `ssh_pool.idle_ttl_sec` 的连接自动回收
 83. **长连接池可观测**（ADR-036）：`GET /runtime/long-connections` 返回 redis/kafka 的 `active`/`idle`/`total`/`available`；`/runtime/metrics` 暴露 `opsgate_{redis,kafka}_connections_{active,idle}`；未注册 connector 时返回结构完整（available=false），不得 404
+84. **CLI 二进制 fail-closed**（ADR-037）：`executionMode='cli'` 创建时 `command` 缺失、非字符串、不存在或无执行位 → **400 且资产不落库**；非 Linux 平台 → 400；`type` 非 `native` → 400（Market 实例化同口径，共用同一判据）。**创建授权**：非 admin 且 `basename(command)` 不在 `cli.member_allowed_binaries` 内 → **403 且不落库**（admin 不受白名单限制；白名单读成非数组 = 空白名单 = 成员一个也建不了（fail-closed，不是"读不到就放行"）；条目 `trim()` 后比对，空白条目丢弃；两条创建入口同口径；403 写一条 `cli_create_denied` 审计，status=blocked，含 command 与 actor，不回显白名单内容）。**command 落库值**：cli 资产按 `trim()` 后落库（校验/白名单/spawn 必须同源，否则出现"校验通过但执行时 spawn 带空格的名字"）。**args/headers**：cli 资产带非空 `args` 或非空 `headers` → **400 且不落库**（本期 CLI 链路只跑 `bin + 调用方 argv`，接受后静默丢弃等于"看起来成功"）；判据认"存在且非空"而非只认数组——`args:'--version'`、`args:{a:1}`、`headers:'Authorization'`、`args:1` 一律 400（**不得 200 落库、不得 500**），只有 `undefined`/`null`/`''`/`[]`/`{}` 视为未传
+85. **CLI 发现链路面**（ADR-037）：`opsgate_list_assets` 返回的每个资产带 `executionMode`（`native`/`mcp`/`cli`）；cli 资产在 `opsgate_list_asset_tools` 只返回**一个**工具 `${category}_run`，其 `inputSchema.required` 含 `argv`（`items.type='string'`）；cli 资产**不出现在 `tools/list`**（只走元工具链）
+86. **cli 分支防越权**（ADR-037，越权负例）：`category='redis'` 且 `executionMode='cli'` 的资产，`opsgate_list_asset_tools` 不返回 `redis_command`/`redis_info`/`redis_slowlog` 等同品类原生工具；用 `tool=redis_command` 调 `opsgate_invoke` 返回 `-32601`；即便绕过发现层直接分派原生工具，`runGuarded` 的执行方式闸门也拒绝（`rejectExecutionModes: ['cli']`）
+87. **argv 逐元素进规则**（ADR-037）：`argv` 每个元素独立进入 `arg` 维度正则匹配（不是整串拼接）；命中 `kind=mark` 内置 CLI 规则（如 `argv` 含 `FLUSHALL` 或 `--replicas=0` 单 token）时审计 `risk=high`、执行仍继续；命中 `kind=block` 时返回 `-32004` 且不启动进程。**注**：审计表无"命中规则"列，只记录入参与 risk 等级，不展开命中规则名；单 token 匹配无法表达跨 token 组合（如 `get secret` 由 `^secrets?$` 单 token 近似覆盖）。
+88. **凭证不进 argv 与明文审计**（ADR-037）：`argv` 中出现的任何凭证值在渲染后不进入子进程参数（实现层不做 `${SLOT}` → argv 替换）；`file:true` 槽位落 0600 临时文件且目录 0700，执行结束（含失败/超时）后目录必被删除；审计记录中的 `argv` 与 `output` 不含凭证明文
+89. **bwrap 不可用即拒执行**（ADR-037）：bwrap 不可用（非 Linux 或探测失败）时 CLI 执行返回明确错误并**不启动进程**（不降级裸跑）；同一事实在 `opsgate_view_asset` 的 `cli.health` 与 `/runtime/cli` 的 `health` 中显示为 `sandbox-unavailable`
+90. **CLI 运行时可观测与终止**（ADR-037）：`GET /runtime/cli` 返回 `available` + 在飞 `runs` + `stats` + 全部 cli 资产 `health`（未装配执行器时 `available=false` 且不伪造状态）；对在飞 runId 调 `DELETE /runtime/cli/:runId` 后该进程树被终止、`runs` 中移除，并写一条 `runtime_cli_kill` 系统动作审计（含 `runId` 与 `argvSummary`；`runtime_cli_kill` 暂不在治理动作清单内，`scope=management` 筛不出，与既有 `runtime_instance_close` 同口径）；runId 不存在 → 404
 
 ---
 
@@ -1642,6 +1759,7 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 - **类型组需按 tag 收窄**：host 组 300 台主机虽只有 5 个工具，但候选集会稀释 LLM 注意力，建议用 ?tag= 收窄到 30 台以内（§5.5.6）
 - **原生 SSH 为非交互 shell**：无 PTY，不支持 sudo 交互输密码与 vim/tail -f 等交互命令（§5.5.7）
 - **文件传输走 HTTP 旁路**：MCP 仅申请一次性入口（TTL 5min），本体经 `PUT/GET /mcp/transfer/:id` 传输；单文件 ≤200MB、暂存盘配额 2GB，更大需分批（§5.5.7）
+- **CLI 资产（ADR-037）**：① 仅 Linux（bwrap / tree-kill）；② 一期二进制**由主机预装**，网关不负责安装（镜像需自建并预装 kubectl/mysql/redis-cli 等）；③ bwrap 不可用即拒执行，不降级裸跑；④ 内置 CLI 危险规则对**存量库惰性**（`.guard-rules-seeded` 一次性标记保护，部署升级后需管理员手工补或显式重播种）；⑤ 通用 `${category}_run` 无法枚举所有危险子命令（argv 逐元素匹配无法表达跨 token 组合如 `get secret`），靠规则覆盖 + 管理员 block；⑥ `url` 的 SSRF 校验对 CLI 只是纵深防御（argv 仍可带内网地址，靠 `arg` 维度内置规则兜）；⑦ **CLI 白名单按二进制 basename 比对**（`cli.member_allowed_binaries`）：`/tmp/evil/kubectl` 这类同名自建二进制也能命中，**「成员无网关主机写权限」是前提**（否则可放置同名恶意二进制绕过）；若开放成员写权限，须改为**白名单目录前缀校验**；⑧ 该白名单**仅约束 cli 资产**，**mcp stdio 资产的 `command` 不受此白名单约束**（既有行为，成员可建 `command=node` 的 mcp 资产经实例池执行；另案评估，勿把白名单当成"主机上不会跑任意程序"的保证）
 
 ---
 
@@ -1711,3 +1829,4 @@ Tailwind 映射：`colors` 全部指向 CSS 变量，禁止组件里出现裸 he
 | **ADR-034** | **同槽位多凭证的确定性择优**（用户 2026-11-19 拍板，起因：v1→v2 数据迁移后发现 73 个槽位存在多条绑定；`privileges` 回填前有 66 个槽位的取舍不确定，回填后仍有 7 个槽位候选凭证**权限等级相同**，旧实现仅按 `privileges` 排序，同分时结果取决于 SQLite 返回行序 —— 同一份数据在不同机器/不同查询计划下可能取到不同账号，属隐式不确定）：① 排序键改为三级：**权限等级**（沿用 ADR-028 §2.4 的 root→rw→wo→ro→无）→ **管理类账号优先**（凭证名或绑定用户名匹配 `root`/`admin`/`administrator`/`superuser`/`superadmin`，按词边界匹配，避免误命中 `rootfs` 之类）→ **`credentialId` 字典序**。② 该规则只影响「多条绑定都已经可选、现在要挑一条」的场景，**不改变** personal 优先于 asset 的层级，也不改变任何授权判定（`privileges` 仍是展示性元信息，ADR-028 §④ 不变）。③ 实现集中在 `pickBestBinding()`，`resolveSlotValues` 与 `slotCredentialKey` 共用，避免两处口径漂移。④ `src/credential-tiebreak.test.ts` 锁定行为：业务账号先插入时仍应取到 root 账号，且重复调用结果一致。⑤ **不为存量数据伪造等级**：同等级绑定的取舍一律由本规则确定，不靠改写 `privileges` 让排序"看起来对"。迁移数据实测（`verify-real-resolve.mjs`，用 `.60` 上真实 `CredentialService`）：7 处同等级槽位 **7/7 落到管理账号**（其中 3 处是绑定用户名=`root` 的 `k8s-vm` 凭证，按"凭证名或绑定用户名"判定为管理账号）。 | §4.3、§5.3 槽位取值、`src/services/credentials.ts`（`pickBestBinding`）、`src/credential-tiebreak.test.ts` |
 | **ADR-035** | **资产形态与执行配置创建后不可改**（用户 2026-11-21 纠正"编辑功能放太开了"）：① 新建资产时可调的只有**标签、凭证绑定、基础信息与名称**；编辑时同样只能改这些，外加**连接目标**（原生 host 的 `hostConn{host,port,username,authSlot,authPassSlot}`）与**安全开关**（`allowPrivateNetwork` / `allowInsecureTls`）——用户选择口径为"基础信息 + 连接目标"。② `PATCH /servers/:id` 对 `category` / `executionMode` / `type` / `command` / `args` / `env` / `headers` **显式 400 拒绝**，且**整批拒绝**（含合法字段的混合请求也不落库），不做静默忽略（静默忽略会让调用方以为改成功了）。③ **推翻 ADR 前序实现**：`79b5c56` 曾开放形态字段修改并做形态自洽矩阵校验，`a38ac69` 曾开放执行配置修改 —— 两者均回撤，`src/asset-shape-edit.integration.test.ts`（9 例）随之删除。④ UI 同步收敛：详情页「可见性」Tab 的标签/地址/私网/TLS 内联编辑全部移除，改为**只读展示 + 顶部「编辑」弹窗**，单一入口避免两处可写；TLS 开关按用户二次确认回到可见性 Tab（属资产级安全开关，非形态）。⑤ 建错形态的唯一路径是**重建资产**，不在旧资产上换形态 —— 换形态会让已绑槽位、已签发工具名（`{category}_{tool}`）与既有审计语义同时失效 | §4.1 字段、§7 `PATCH /servers/:id` 可改字段、§8.5 `/assets/:id`、§9 AC-77/78、`src/routes/assets.ts`（`immutable` 前置拒绝）、`frontend/src/components/AssetEditModal.tsx`、`src/asset-immutable-fields.integration.test.ts` |
 | **ADR-036** | **原生运维能力扩容 + raw 工具准入规则**（用户 2026-11-23 提出：ES 加 Market 条目 / nacos 加工具 / 扩 rocketmq / zabbix 加 raw 兜底 / redis+kafka 加原生 connector）：① **ES 走 Market 条目**（`cr7258-elasticsearch-mcp-server`，PyPI `elasticsearch-mcp-server==2.1.9`）而非原生 connector —— 它是社区 MCP 派生模型，官方 `@elastic` 版已弃用且只有 4 个只读工具。② **Redis/Kafka 走原生 connector**：现有 redis 资产是 `executionMode='mcp'` 且该字段受 ADR-035 冻结，**无法原地获得原生工具**；决策为**新增 `redis` / `kafka` 品类但不迁移存量**（存量 10 台 redis 保持 other+mcp，需要原生命令时新建 native 资产）。③ **Nacos/RocketMQ/Zabbix 扩原生工具**：新增 5+4+7 个工具，其中 zabbix 的「只读方法白名单」改造为**三层闸门**（只读白名单 / 永久黑名单 27 个账号与脚本类方法 / raw 需 confirm_dangerous）。④ **raw 工具四条准入规则**：动作参数必须顶层扁平 string（保证 guard_rules `arg` 维度可命中）；三者语义不合并（Redis 任意命令 / Kafka 8 动作枚举 / Zabbix 任意方法+黑名单）；危险动作强制 `confirm_dangerous: true`；默认启用（用户决策 D3）但危险动作二次确认是最后一道闸。⑤ **长连接 connector 池化**：按 `assetId + 连接参数 + 凭证指纹` 分池，复用 `ssh_pool.idle_ttl_sec` 做 idle 回收，`invalidate(assetId)` 真断开。**引入 `ioredis@6.1.0` + `kafkajs@2.2.4` 两个 runtime 依赖**（9→11） | §4.1 category、§5.9.1 Connector、§5.9.10 长连接与 raw 策略、§7 资产创建校验、§9 AC-79~83、`src/native/connectors/{redis,kafka}.ts`、`src/native/tools/{redis,kafka,nacos,rocketmq,zabbix}/`、`src/services/{redis,kafka}Connection.ts`、`src/data/market-catalog.json`、`src/native/httpTools.test.ts` |
+| **ADR-037** | **CLI 类型资产与沙箱执行**（用户 2026-11-25 确认，起因：运维日常大量动作依赖 kubectl / mysql / redis-cli / kafka-topics.sh，而 `host_execute_command` 拼 shell 字符串、凭证写在命令行、命令形态与主机绑定）：① 新增第三种 `execution_mode='cli'`，`servers` **不新增表/列**（`command`=二进制、`env`=注入模板、`credential_slots`=声明、`url`=目标地址经 `${OPSGATE_TARGET}` 注入）。② 参数形状 `argv: string[]`，`spawn` + `shell:false` 直执行（不经 shell、不做转义），与 `redis_command` 的 `type:'array'` 先例同构。③ 每资产只暴露 `${category}_run`（按品类派生，不从二进制名派生），cli 工具不进 `tools/list`，只走 `list_assets → list_asset_tools → invoke` 元工具链。④ **cli 分支必须置于 native 分支之前**，且 native 分派唯一收口点传 `rejectExecutionModes:['cli']` —— 同品类原生工具不得作用于 CLI 资产（同品类 ≠ 同执行方式）。⑤ 凭证只经 env / 0600 临时文件（目录 0700、按 runId 隔离、四条退出路径都删），实现层不做 `${SLOT}` → argv 替换。⑥ Linux 默认经 bwrap 沙箱（`--ro-bind / /`、`--tmpfs <dataDir>` 遮 DB 与密钥、`--bind <credsDir> /run/cli-creds` 只暴露本次凭证、unshare pid/ipc/uts、保留网络），不可用即 fail-closed 拒执行。⑦ 独立 `CliRunner`，不进 `InstancePool`（CLI 无 ready 态）。⑧ 三条执行路径的门禁 `runGuarded` 合并 **native + cli**，derived 因会话快照与审计形状不同**保留自身实现**，其规则覆盖由契约测试守。⑨ 内置 5 条 CLI 危险规则**默认 mark 不 block**（既有规则对 FLUSHALL / `--replicas=0` / helm uninstall / `mc rm --recursive` / `get secret` 全部漏判），argv 逐元素匹配。⑩ 创建时强校验二进制存在且可执行（缺失即 400），Market 复用同一判据。⑪ `list_assets` 带 `executionMode`、`view_asset` 带 CLI 段（只给变量名不给值）。⑫ 运行时 `/runtime/cli` GET/DELETE + `opsgate_cli_executions_{active,total}` 指标，不新建执行历史表（历史从审计聚合）。⑬ **创建授权（2026-11-25 最终审查 C-1 补入）**：CLI 资产的 `command` 就是网关要 spawn 的程序，成员能建 `bash` 资产等于"以网关进程身份跑任意程序"，故成员仅可建 L1 白名单 `cli.member_allowed_binaries` 内的二进制（按 basename 比对），admin 不受限；`args`/`headers` 本期不被 CLI 链路读取，创建时非空即 400（不静默丢弃） | §4.1 `execution_mode` 与 4.1.1 列语义、§5.9.11 CLI 资产执行、§7 `/runtime/cli`、§9 AC-84~90、§10.4 已知限制、`src/services/{cliTool,cliSandbox,cliRunner}.ts`、`src/framework/dispatchCore.ts`（`runGuarded`）、`src/services/{toolAggregation,mcpEndpoint}.ts`、`src/routes/{assets,market,runtime}.ts`、`src/db/builtinGuardRules.ts`、`docs/adr-037.md` |

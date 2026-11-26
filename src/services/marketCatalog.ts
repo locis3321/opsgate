@@ -31,11 +31,21 @@ export interface CatalogEntry {
    */
   defaultGroup?: string;
   /**
-   * 执行分层（ADR-022 扩展）：`mcp`（默认，代理社区实现，走实例池）|
-   * `native`（网关内建 HTTP 工具，无子进程；管理 API 地址由用户建资产时填写）。
-   * `native` 条目的槽位来自 `slotLabels`——工具按槽位名从 ctx.credentials 取值，不经配置注入。
+   * 执行分层（ADR-022 扩展，ADR-037 扩为三值）：`mcp`（默认，代理社区实现，走实例池）|
+   * `native`（网关内建 HTTP 工具，无子进程；管理 API 地址由用户建资产时填写）|
+   * `cli`（网关本机 CLI，argv 直执行；二进制与槽位由 `cli` 段声明）。
+   * `native` / `cli` 条目的槽位来自 `slotLabels`——值按槽位名注入，不从配置里扫描占位符。
    */
-  executionMode?: 'mcp' | 'native';
+  executionMode?: 'mcp' | 'native' | 'cli';
+  /**
+   * CLI 条目声明（`executionMode='cli'` 时必填，实例化落库为 `servers.command/args/env/url`）：
+   * - `bin`：二进制名或绝对路径（一期要求主机预装，创建时 fail-closed 校验）
+   * - `env`：环境变量模板，`${SLOT}` 由凭证槽位渲染（CliRunner 侧渲染，落库保留模板）；
+   *   模板里写 `${OPSGATE_TARGET}` 表示"资产 url 落到这个环境变量"——这是 url 唯一生效途径
+   * - `urlEnv`：声明式说明，指向 env 模板里承接 url 的那个变量名（CliRunner 只认 `${OPSGATE_TARGET}` 占位）。
+   *   条目没有 env 承接 url 时**不要**声明它：那会让"填了目标地址"看起来生效，实际无处可落
+   */
+  cli?: { bin: string; env?: Record<string, string>; urlEnv?: string };
   installations: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }>;
 }
 
@@ -151,8 +161,11 @@ export function detectSlotsInConfig(entry: CatalogEntry, config: ConfigSnapshot)
   return [...byName.values()];
 }
 
+/** CLI 槽位的落文件启发：kubeconfig / 证书 / 私钥这类值是文件内容，必须落 0600 临时文件（CliRunner 侧写盘） */
+const CLI_FILE_SLOT_RE = /KEY|KUBECONFIG|CERT|PEM/i;
+
 /** 槽位自动识别（目录条目默认配置）。
- *  原生条目没有可扫描的配置（工具直连产品 API），槽位由 `slotLabels` 声明。 */
+ *  原生 / CLI 条目没有可扫描的配置（工具直连产品 API、CLI 二进制由主机预装），槽位由 `slotLabels` 声明。 */
 export function detectSlots(entry: CatalogEntry): DetectedSlot[] {
   if (entry.executionMode === 'native') {
     return Object.entries(entry.slotLabels ?? {}).map(([name, label]) => ({
@@ -161,6 +174,17 @@ export function detectSlots(entry: CatalogEntry): DetectedSlot[] {
       label,
       // 原生工具的槽位值直接进 ctx.credentials，不落文件也不进子进程
       file: false,
+      sensitive: SENSITIVE_KEY_RE.test(name),
+      placeholder: `\${${name}}`,
+    }));
+  }
+  if (entry.executionMode === 'cli') {
+    return Object.entries(entry.slotLabels ?? {}).map(([name, label]) => ({
+      target: 'env' as const,
+      name,
+      label,
+      // CLI 的槽位经环境变量注入子进程；文件类值（kubeconfig/证书/私钥）落 0600 临时文件，env 只给路径
+      file: CLI_FILE_SLOT_RE.test(name),
       sensitive: SENSITIVE_KEY_RE.test(name),
       placeholder: `\${${name}}`,
     }));
@@ -179,6 +203,11 @@ function defaultLabel(name: string): string {
 
 /** 展开配置快照（§5.3 第 1 步）：命令固化版本已在目录 JSON 中保证（AC-62）；HTTP 条目带 url/headers */
 export function expandConfig(entry: CatalogEntry): ConfigSnapshot {
+  // CLI 条目的二进制/环境变量来自 `cli` 段（installations 只是二期安装框架的占位）。
+  // 与 `db/marketEntries.rowToEntry` 从库里还原 cli 段的口径一致：预览与实例化看到同一份配置。
+  if (entry.executionMode === 'cli') {
+    return { command: entry.cli?.bin ?? '', args: [], env: { ...(entry.cli?.env ?? {}) }, url: null, headers: {} };
+  }
   const install = entry.installations[entry.runtime];
   if (!install) return { command: '', args: [], env: {}, url: null, headers: {} };
   return {

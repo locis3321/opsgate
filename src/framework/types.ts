@@ -55,6 +55,9 @@ export interface HostConn {
   hostFingerprint?: string;
 }
 
+/** 资产执行方式：内置原生工具 / MCP 服务器 / CLI 二进制直执行（argv，不经 shell） */
+export type ExecutionMode = 'native' | 'mcp' | 'cli';
+
 /** 资产视图（由 T8 assetService 解析后注入；工具只见白名单字段） */
 export interface AssetView {
   id: string;
@@ -62,7 +65,7 @@ export interface AssetView {
   category: string;
   /** 归属人（can()/写入侧同主校验用）；成员被删除后为 null（无主，仅 admin 可用） */
   ownerId: string | null;
-  executionMode: 'native' | 'mcp';
+  executionMode: ExecutionMode;
   hostConn?: HostConn | null;
   url?: string | null;
   /** 关闭 TLS 证书校验（仅该资产显式开启；见 servers.allow_insecure_tls） */

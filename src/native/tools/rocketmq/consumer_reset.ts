@@ -4,7 +4,7 @@
  * Dashboard 端点：POST /consumer/resetOffset.do（form）
  * 参数：consumerGroup / topic / resetOffset（相对标记）
  *
- * ⚠ 位点回退会导致重复消费，前移会丢消息 —— 这是最容易造成业务事故的运维动作。
+ * 注意：位点回退会导致重复消费，前移会丢消息 —— 这是最容易造成业务事故的运维动作。
  * risk='destructive' 且必须二次确认；reset_type 用枚举而不是自由字符串，避免 LLM 编造取值。
  */
 import type { NativeToolDefinition } from '../../../framework/types.js';

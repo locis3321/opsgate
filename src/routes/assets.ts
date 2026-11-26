@@ -7,6 +7,8 @@
  * - groups：CRUD + 成员/资产勾选
  * 治理审计 action：visibility_change / group_change / credential_bind / credential_rotate。
  */
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
 import { and, eq, inArray, ne } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -17,7 +19,7 @@ import { encryptCredential } from '../services/crypto.js';
 import { parseRef, CRED_KINDS, CREDENTIAL_TYPES } from '../config/constants.js';
 import { DEFAULT_GROUP_BY_CATEGORY } from '../framework/types.js';
 import { buildInstanceKey, transportOf } from '../services/instancePlan.js';
-import { assertUrlAllowed, SsrfError } from '../services/ssrf.js';
+import { assertCliTargetAllowed, assertUrlAllowed, SsrfError } from '../services/ssrf.js';
 import { validateCredentialValues } from '../services/credentialValidation.js';
 import { normalizeTags } from '../services/assetTags.js';
 import { makeHandle } from '../native/connectors/http.js';
@@ -27,6 +29,7 @@ import type { InstancePool } from '../services/instancePool.js';
 import type { SshConnector } from '../native/connectors/ssh.js';
 import type { CredentialService } from '../services/credentials.js';
 import { pickBestBinding, resolveSlotKey } from '../services/credentials.js';
+import { isExecutableFile } from '../services/cliRunner.js';
 import { buildPlan, makeRefResolver } from '../services/instancePlan.js';
 import { Redis } from 'ioredis';
 import { Kafka, logLevel } from 'kafkajs';
@@ -46,6 +49,152 @@ function claimTesting(assetId: string): boolean {
   testingAssets.set(assetId, now + 30_000);
   return true;
 }
+
+/**
+ * CLI 二进制探测结果。刻意区分"找不到"与"探测手段本身不可用"：
+ * 前者是用户输入问题（400），后者是宿主环境问题——把 `which` 缺失报成"二进制不存在"
+ * 会让运维按错误方向排查（§2 原则 2/5：不伪造事实、错误在源头如实暴露）。
+ */
+type BinProbe =
+  | { kind: 'found'; resolved: string }
+  | { kind: 'missing' }
+  | { kind: 'probe-unavailable'; detail: string };
+
+/**
+ * 解析 CLI 二进制（设计说明 D13：创建时强校验存在且可执行，缺失即 400）。
+ *
+ * 为什么不在这里自己读 PATH：AC-61 红线禁止 src/ 业务代码读进程环境（`scripts/check-redlines.mjs`
+ * 逐字扫那条环境变量访问表达式），而且手写 PATH 扫描会和 `CliRunner.health` 的解析口径漂移。
+ * 于是把"PATH 查找"交给 `which` 子进程——它自己读宿主 PATH，按"真实文件 + 可执行位"判定，
+ * 不会像 shell 内建那样把 `cd` 这类无实体名字当命中；参数按数组传递、不经 shell，无注入面。
+ *
+ * 两处 fail-open 已堵：
+ *  - 裸名查找必须用 `--` 结束选项解析，否则 `--version` / `-v` 会被 which 当选项，status=0 → 假命中；
+ *  - 含分隔符/绝对路径必须是**普通文件 + 可执行位**（`isExecutableFile`），只看 X_OK 会让
+ *    `/tmp`、`/usr/bin` 这类目录（可执行位 = 可搜索）通过校验。
+ * 判据与 `CliRunner.health` 当前同源（同为 `isExecutableFile`）；Task 9 引入 PATH 配置后需保持 PATH 一致。
+ */
+function resolveCliBinary(bin: string): BinProbe {
+  if (bin.includes('/') || path.isAbsolute(bin)) {
+    return isExecutableFile(bin) ? { kind: 'found', resolved: bin } : { kind: 'missing' };
+  }
+  const r = spawnSync('which', ['--', bin], { timeout: 3000, encoding: 'utf8' });
+  if (r.error) {
+    // ENOENT = 本机没有 which（Debian bookworm 的 debianutils 自带，属异常部署）
+    return { kind: 'probe-unavailable', detail: r.error.message };
+  }
+  const resolved = (r.stdout ?? '').trim();
+  if (r.status === 0 && resolved) return { kind: 'found', resolved };
+  return { kind: 'missing' };
+}
+
+/**
+ * CLI 资产创建校验：返回 null 表示可建，否则返回错误文案（fail-closed）。
+ * 文案同时作为 400/500 的 message，由调用方按 `status` 决定状态码。
+ *
+ * 入参用 `unknown` 而非 `string`：body 是外部输入，类型声明只是路由侧约定，
+ * 非字符串（如 123）若直接 `.trim()` 会抛 TypeError 变成未捕获 500——这里显式 400。
+ *
+ * 返回的 `detail` 仅供服务端日志（宿主排查线索），**不得**回给客户端。
+ *
+ * 也由 Market 实例化路径复用（同一份判据，避免两条创建入口口径分裂）。
+ */
+export function cliCreateError(
+  command: unknown,
+): { status: 400 | 500; message: string; detail?: string } | null {
+  // 部署事实：CLI 执行链（bwrap / tree-kill / stdio 信号模型，Spec §10.4）只在 Linux 成立
+  if (process.platform !== 'linux') return { status: 400, message: 'CLI 资产仅支持 Linux 部署' };
+  if (command !== undefined && command !== null && typeof command !== 'string') {
+    return { status: 400, message: 'command 必须是字符串（二进制名或路径）' };
+  }
+  const bin = (command ?? '').trim();
+  if (!bin) return { status: 400, message: 'CLI 资产必须填写二进制（command）' };
+  const probe = resolveCliBinary(bin);
+  if (probe.kind === 'probe-unavailable') {
+    // 固定文案回客户端：spawnSync 的 error.message 含宿主细节（which 的绝对路径等），
+    // 属内部部署信息不外泄；排查所需原文由调用方写服务端日志。
+    return { status: 500, message: '无法校验二进制：宿主缺少 which（属异常部署，请联系管理员）', detail: probe.detail };
+  }
+  if (probe.kind === 'missing') return { status: 400, message: `二进制 "${bin}" 不存在或不可执行（一期要求主机预装）` };
+  return null;
+}
+
+/**
+ * CLI 资产创建的**授权**校验（最终审查 C-1）：成员只允许建白名单内的二进制，管理员不受限。
+ *
+ * 为什么必须在创建路径上拦：CLI 资产的 `command` 就是网关主机上要 spawn 的程序，成员能建
+ * `bash` 资产等于拿到了"以网关进程身份跑任意程序"的口子（RCE 量级跃迁）。白名单是**策略**
+ * （不同环境预装的运维工具不同），所以放 L1 `cli.member_allowed_binaries` 而不是代码常量。
+ *
+ * 比对口径是 **basename**：`/usr/local/bin/kubectl` 与 `kubectl` 是同一个二进制，
+ * 按整串比对会让成员用绝对路径绕过白名单（"写全路径就能建"）。
+ *
+ * 白名单读到非数组（测试 stub 未覆盖该 key）时按**空白名单**处理 —— fail-closed：
+ * 成员一个也建不了，而不是"读不到配置就当全放行"。
+ *
+ * 返回 null 表示允许；否则返回给客户端的固定文案（不回显白名单内容，避免探测内部策略）。
+ * 由 `POST /servers` 与 Market 实例化两条创建入口共用，避免口径分裂。
+ */
+export function cliCreateDeniedForMember(
+  principal: { isAdmin: boolean },
+  command: unknown,
+  settings: import('../config/settings.js').SettingsLike,
+): string | null {
+  if (principal.isAdmin) return null;
+  const allowed = settings.get<unknown>('cli.member_allowed_binaries');
+  // 条目逐个 trim：管理员在 /settings 里填 `" kubectl "` 时不能静默失效（空格不进传播路径，
+  // 命中判据用的是 trim 后的 basename，两侧口径必须一致）；trim 后为空的条目直接丢弃。
+  const list = Array.isArray(allowed)
+    ? allowed
+        .filter((v): v is string => typeof v === 'string')
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0)
+    : [];
+  if (typeof command !== 'string') return null; // 非字符串由 cliCreateError 报 400（本判据不接管形态校验）
+  const bin = path.basename(command.trim());
+  // 空 command 交给 cliCreateError 报"必须填写二进制"：两者都建不出来，让错误指向真正缺的那一项
+  if (!bin) return null;
+  if (list.includes(bin)) return null;
+  return '成员仅可创建白名单内的 CLI 资产（管理员可建任意）';
+}
+
+/**
+ * CLI 资产的 `args` / `headers` 本期恒为空（Spec §4.1.1）：
+ * `args` 是"固定前缀参数"，`headers` 属 MCP HTTP 传输；`CliRunner` 只跑 `bin + 调用方给出的 argv`，
+ * 因此带上非空值一定不会被读取。静默丢弃 = "看起来保存成功、实际不存在"（§2 原则 5），显式 400。
+ *
+ * 返回错误文案或 null。两条创建入口共用。
+ */
+export function cliUnsupportedFieldsError(body: {
+  args?: unknown;
+  headers?: unknown;
+}): string | null {
+  if (fieldHasContent(body.args) || fieldHasContent(body.headers)) return CLI_UNSUPPORTED_FIELDS_MSG;
+  return null;
+}
+
+/**
+ * "这个可选字段带了内容吗"（I-1 判据的唯一实现）。
+ *
+ * 为什么不能只认容器形态：原判据写的是 `Array.isArray(args) && length>0`，于是
+ * `args: '--version'`（字符串）和 `args: {a:1}`（对象）都绕过了拒绝——前者静默落库，
+ * 后者在后面的 `for (const a of payload.args)` 里抛 TypeError 变成 500。**非数组的 args
+ * 本身就是非法形态**，不能因为"不是数组"就当成"没带"。headers 同理。
+ *
+ * 空值口径：`undefined` / `null` / `''` / `[]` / `{}` 视为未带（前端某些路径会带空值，
+ * 不因此拒绝合法请求）；其余一律算带内容——数字/布尔这类非法标量也算，因为它们一旦落库
+ * 就是"看起来保存成功、执行时不存在"的同一类问题。
+ */
+function fieldHasContent(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string') return value.length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value as object).length > 0;
+  return true;
+}
+
+/** 固定文案（两条入口共用一份，避免两处措辞漂移） */
+export const CLI_UNSUPPORTED_FIELDS_MSG = 'CLI 资产不支持 args/headers（固定前缀参数本期未实现），请用 argv 传参';
 
 /**
  * 资产删除后清理安全策略里的引用（2026-11-18 三级作用域）。
@@ -131,12 +280,18 @@ async function ensureDefaultGroupFor(
   return created.id;
 }
 
-/** 治理审计（一目了然的事件落一条：visibility_change / group_change / credential_bind / credential_rotate / guard_rule_change / system_setting） */
+/**
+ * 治理审计（一目了然的事件落一条：visibility_change / group_change / credential_bind / credential_rotate / guard_rule_change / system_setting）
+ *
+ * `status` 默认 `success`（事件已发生）。被拒事件的留痕传 `blocked`：审计页按"已被拦截"呈现，
+ * 且 `blocked` 行走 writeIntent 单写（不经过 `fill()`），不会污染 `audit_stats_hourly` 的调用计数。
+ */
 export function governanceAudit(
   audit: AuditService,
   principal: { userId: string; isAdmin: boolean },
   action: string,
   args: Record<string, unknown>,
+  status: 'success' | 'blocked' = 'success',
 ): Promise<unknown> {
   return audit.writeIntent({
     principal,
@@ -144,9 +299,41 @@ export function governanceAudit(
     tool: 'system_setting',
     args,
     risk: 'normal',
-    status: 'success',
+    status,
     action,
   });
+}
+
+/**
+ * 成员建 CLI 资产被白名单拒绝时留一条审计（`cli_create_denied`）。
+ *
+ * 为什么值得单独一条：403 是本项目唯一的"创建期角色闸门"，没有留痕就只能靠反查"谁试过建 bash"
+ * —— 而那正是安全复盘要看的第一条线索（反复试探白名单边界 = 越权意图的早期信号）。
+ * 记录 command 原文（这是用户提交的输入，不是凭证）与 actor；**不记录白名单内容**（避免把内部策略
+ * 写进入口更宽的审计视图）。
+ *
+ * 写审计失败不改变拒绝结果：审计通道异常不应把"已经拒绝的请求"变成放行，也不应把 403 变成 500
+ * —— 拒绝已生效，日志留一条即可（`AuditService.writeIntent` 的 write-ahead 语义只对工具调用要求
+ * fail-closed，创建期拦截没有"已执行"副作用可藏）。
+ */
+export async function auditCliCreateDenied(
+  req: FastifyRequest,
+  audit: AuditService,
+  principal: { userId: string; isAdmin: boolean },
+  command: unknown,
+  entry: string,
+): Promise<void> {
+  try {
+    await governanceAudit(
+      audit,
+      principal,
+      'cli_create_denied',
+      { entry, command: typeof command === 'string' ? command : String(command ?? '') },
+      'blocked',
+    );
+  } catch (err) {
+    req.log.error({ err }, 'cli_create_denied 审计写入失败');
+  }
 }
 
 export interface AssetRoutesDeps {
@@ -651,7 +838,32 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           return reply.code(400).send({ code: 400, data: null, message: 'type 仅 stdio|http|sse|native' });
         }
         const executionMode = body.executionMode ?? (body.category === 'host' ? 'native' : 'mcp');
-        if (!['native', 'mcp'].includes(executionMode)) return reply.code(400).send({ code: 400, data: null, message: 'executionMode 仅 native|mcp' });
+        if (!['native', 'mcp', 'cli'].includes(executionMode)) return reply.code(400).send({ code: 400, data: null, message: 'executionMode 仅 native|mcp|cli' });
+        // CLI 资产：形态复用 type=native（无 MCP 子进程包装），二进制来自 command 列（D10）。
+        // 创建即校验 Linux 平台 + 二进制存在且可执行：缺失就 400，不让"永远跑不起来"的资产落库（D13 / fail-closed）。
+        if (executionMode === 'cli') {
+          // 形态复用约定：cli 的执行方式是 native（无 MCP 子进程包装）。type 若为 stdio/http/sse，
+          // 下游会按 MCP 传输解析 URL/子进程，与 executionMode=cli 相互矛盾 —— 显式拒绝，不猜意图。
+          if (body.type !== 'native') {
+            return reply.code(400).send({ code: 400, data: null, message: 'cli 资产的 type 必须是 native' });
+          }
+          // 授权先于形态：成员能建 `bash` 资产就等于能在网关主机上跑任意程序（C-1）。
+          // 放在 cliCreateError 之前，避免"二进制存在性"这类探测信息先回流给无权者。
+          const authzErr = cliCreateDeniedForMember(p, body.command, deps.settings);
+          if (authzErr) {
+            await auditCliCreateDenied(req, audit, p, body.command, 'POST /servers');
+            return reply.code(403).send({ code: 403, data: null, message: authzErr });
+          }
+          // args/headers 本期不被 CLI 链路读取，带了就显式拒绝（不静默丢弃，I-1）
+          const unsupported = cliUnsupportedFieldsError(body);
+          if (unsupported) return reply.code(400).send({ code: 400, data: null, message: unsupported });
+          const cliErr = cliCreateError(body.command);
+          if (cliErr) {
+            // detail 只进服务端日志：客户端只拿固定文案（不泄露宿主路径等内部信息）
+            if (cliErr.detail) req.log.error({ detail: cliErr.detail }, 'cli 二进制探测不可用');
+            return reply.code(cliErr.status).send({ code: cliErr.status, data: null, message: cliErr.message });
+          }
+        }
         // native 的三种形态：host=SSH 直连（需 hostConn）；zabbix/rocketmq/nacos=HTTP API（需 url）；
         // redis/kafka=长连接（需 url 或槽位里的地址）。其余 category 仍只能走 mcp（社区 MCP 子进程）。
         const HTTP_NATIVE_CATEGORIES = ['zabbix', 'rocketmq', 'nacos', 'redis', 'kafka'];
@@ -710,9 +922,15 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
         // 创建时允许显式开启私网：原实现硬编码 false，导致「市场 tab 能建内网原生资产、自定义表单不能建」
         // 两条路径口径不一致（market.ts 的 instantiate 是读 body.allowPrivateNetwork 的）。
         // 放宽的是**同一道闸门**的开关，不是取消校验——云元数据地址始终拒绝。
+        // cli 的 url 是 `host:port` 形态，必须先归一化再校验，否则 `new URL('db.internal:3306')`
+        // 拿到空 hostname、`lookup('')` 返回空数组，校验循环空转（与 Market 实例化同一份判据）。
         if (body.url) {
           try {
-            await assertUrlAllowed(body.url, body.allowPrivateNetwork === true);
+            if (executionMode === 'cli') {
+              await assertCliTargetAllowed(body.url, body.allowPrivateNetwork === true);
+            } else {
+              await assertUrlAllowed(body.url, body.allowPrivateNetwork === true);
+            }
           } catch (err) {
             return reply.code(400).send({ code: 400, data: null, message: `SSRF 校验失败：${err instanceof SsrfError ? err.message : String(err)}` });
           }
@@ -755,6 +973,14 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
 
         // 单事务：资产 + 凭证绑定 + 直填值（setSlotValue 走同一 sqlite 连接、同步写入）
         // 初始分组：按品类自动加入内置默认分组（host/mysql/k8s/zabbix/rocketmq/nacos；other 不归组）
+        // 落库值口径与校验口径一致：`cliCreateError` 校验的是 `command.trim()`（`which` / `isExecutableFile`
+        // 都拿 trim 后的串去探测），白名单比对也是 trim 后的 basename。若原样落库 `" kubectl "`，
+        // 就会出现"校验通过、执行时 spawn 到一个带空格的名字"——校验与生效是两个值（§2 原则 5）。
+        // 只对 cli 收口：mcp 的 command 语义本期不在范围内，不动既有行为。
+        const storedCommand: string | null =
+          executionMode === 'cli' && typeof body.command === 'string'
+            ? body.command.trim()
+            : (body.command ?? null);
         const initialGroupId = await ensureDefaultGroupFor(db, category);
         const row = db.transaction((tx) => {
           const created = tx
@@ -768,7 +994,7 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
               category,
               hostConn: (body.hostConn ?? null) as object | null,
               tags: tagsNorm.tags,
-              command: body.command ?? null,
+              command: storedCommand,
               args: (body.args ?? null) as unknown[] | null,
               env: (body.env ?? null) as object | null,
               url: body.url ?? null,
@@ -914,6 +1140,11 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           });
         }
         const patch: Record<string, unknown> = {};
+        // allowPrivateNetwork 是安全开关：先做类型校验再进入任何分支，
+        // 否则字符串 "false" 会在下方 url 校验处被当 truthy（反把私网放开），且脏类型直接落库。
+        if (body.allowPrivateNetwork !== undefined && typeof body.allowPrivateNetwork !== 'boolean') {
+          return reply.code(400).send({ code: 400, data: null, message: 'allowPrivateNetwork 仅 boolean' });
+        }
         if (body.displayName !== undefined) patch.displayName = body.displayName;
         if (body.description !== undefined) patch.description = body.description;
         if (body.tags !== undefined) {
@@ -932,11 +1163,19 @@ export function makeAssetRoutes(deps: AssetRoutesDeps): RouteDefinition[] {
           // 地址可改（建资产时填错、或内建条目升级后要指向真实地址）；仍走 SSRF 校验。
           // 同一请求里可能同时开 allowPrivateNetwork，校验按"变更后的最终值"判定，
           // 否则用户必须发两次请求才能把内网地址存进去。
+          //
+          // cli 资产的地址是 `host:port`（如 db.internal:3306），`new URL` 会把 `db.internal:`
+          // 当 scheme、hostname 为空串，`lookup('')` 返回空数组 → 判定循环一次都不跑 → 静默通过。
+          // 故 cli 走归一化闸门（与创建/Market 实例化同一份）；非 cli 保持原 URL 语义不变。
           const url = body.url.trim();
           if (!url) return reply.code(400).send({ code: 400, data: null, message: 'url 不能为空；如需清空请删除资产' });
           const allowPrivate = body.allowPrivateNetwork !== undefined ? body.allowPrivateNetwork : row.allowPrivateNetwork === true;
           try {
-            await assertUrlAllowed(url, allowPrivate);
+            if (row.executionMode === 'cli') {
+              await assertCliTargetAllowed(url, allowPrivate);
+            } else {
+              await assertUrlAllowed(url, allowPrivate);
+            }
           } catch (err) {
             return reply.code(400).send({ code: 400, data: null, message: `SSRF 校验失败：${err instanceof SsrfError ? err.message : String(err)}` });
           }

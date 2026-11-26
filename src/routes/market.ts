@@ -14,7 +14,7 @@ import type { InstancePool } from '../services/instancePool.js';
 import type { CredentialService } from '../services/credentials.js';
 import type { AuditService } from '../services/audit.js';
 import { buildPlan, makeRefResolver, transportOf } from '../services/instancePlan.js';
-import { assertUrlAllowed, SsrfError } from '../services/ssrf.js';
+import { assertCliTargetAllowed, assertUrlAllowed, SsrfError } from '../services/ssrf.js';
 import {
   detectSlots,
   detectSlotsInConfig,
@@ -24,7 +24,7 @@ import {
 import { categoryCounts, getEntry, listEntries, type MarketStatus } from '../db/marketEntries.js';
 import { getReadme, type FetchImpl } from '../services/readmeFetcher.js';
 import { normalizeTags } from '../services/assetTags.js';
-import { governanceAudit } from './assets.js';
+import { auditCliCreateDenied, cliCreateDeniedForMember, cliCreateError, cliUnsupportedFieldsError, governanceAudit } from './assets.js';
 import type { RouteDefinition } from './registry.js';
 
 export interface MarketDeps {
@@ -36,6 +36,18 @@ export interface MarketDeps {
   runtimeCredsDir: string;
   /** 测试注入：离线 README 抓取实现 */
   readmeFetchImpl?: FetchImpl;
+}
+
+/**
+ * CLI env 模板落库值：url 为空时**摘掉**引用 `${OPSGATE_TARGET}` 的那几个变量。
+ *
+ * 为什么不是让 CliRunner 渲染成空串：`MYSQL_HOST=""` 是一个"看起来有值、实际无意义"的环境变量，
+ * 与条目描述承诺的"留空则由客户端按默认连接"不一致。没填地址就不注入该变量，
+ * 由 CLI 自己的默认值生效——这是唯一可解释的行为。
+ */
+function cliEnvTemplate(env: Record<string, string>, url: string | null): Record<string, string> {
+  if (url) return { ...env };
+  return Object.fromEntries(Object.entries(env).filter(([, v]) => !v.includes('${OPSGATE_TARGET}')));
 }
 
 export function makeMarketRoutes(deps: MarketDeps & { catalogEntries?: CatalogEntry[] }): RouteDefinition[] {
@@ -189,6 +201,47 @@ export function makeMarketRoutes(deps: MarketDeps & { catalogEntries?: CatalogEn
         if ('error' in tagsNorm) return reply.code(400).send({ code: 400, data: null, message: tagsNorm.error });
 
         const isNativeEntry = entry.executionMode === 'native';
+        const isCliEntry = entry.executionMode === 'cli';
+        // CLI 条目的二进制是必填业务事实：条目没声明就不实例化（不猜 bin、不建出永远跑不起来的资产）
+        const cliDecl = isCliEntry ? entry.cli : undefined;
+        if (isCliEntry && !cliDecl?.bin?.trim()) {
+          return reply.code(400).send({ code: 400, data: null, message: '该 CLI 条目缺少 cli.bin 声明，无法实例化' });
+        }
+        // CLI 条目的二进制/env 由条目声明，实例化不接受安装配置（详情页已隐藏编辑区）。
+        // 这里显式拒绝而不是照旧忽略：静默丢弃用户改动等于"看起来成功"，违反 §2 原则 5。
+        if (isCliEntry && body.config) {
+          const c = body.config;
+          const cfgNonEmpty =
+            (typeof c.command === 'string' && c.command.trim() !== '') ||
+            (Array.isArray(c.args) && c.args.length > 0) ||
+            (c.env !== undefined && Object.keys(c.env).length > 0) ||
+            (c.headers !== undefined && Object.keys(c.headers).length > 0) ||
+            (c.url !== undefined && c.url !== null);
+          if (cfgNonEmpty) {
+            return reply.code(400).send({
+              code: 400,
+              data: null,
+              message: 'CLI 条目不支持安装配置（二进制与环境变量由条目声明；目标地址请用 url 字段）',
+            });
+          }
+        }
+        // CLI 的 url 是"目标地址"业务数据，与原生条目同属资产 url：沿用同一道 SSRF 闸门（D12），
+        // 不能因为执行方式是 CLI 就漏检——CLI 会带着这个地址去连目标服务。
+        if (isCliEntry) {
+          const target = (body.url ?? '').trim();
+          if (target) {
+            try {
+              await assertCliTargetAllowed(target, body.allowPrivateNetwork === true);
+            } catch (err) {
+              const msg = err instanceof SsrfError ? err.message : String(err);
+              return reply.code(400).send({
+                code: 400,
+                data: null,
+                message: `SSRF 校验失败：${msg}。若该地址确在内网，勾选「允许私网访问」后重试。`,
+              });
+            }
+          }
+        }
         // 原生条目：无配置可展开，地址由用户填写（该品类产品的管理 API 地址随部署而变，不能写死在目录里）。
         // 例外：redis / kafka 的地址可完全来自槽位（REDIS_HOST+REDIS_PORT / KAFKA_BROKERS），
         // 此时 url 可为空——与 services/{redis,kafka}Connection.ts 的解析优先级一致。
@@ -231,19 +284,55 @@ export function makeMarketRoutes(deps: MarketDeps & { catalogEntries?: CatalogEn
 
         const base = expandConfig(entry);
         const ov = body.config;
-        const config = isNativeEntry
-          ? { command: '', args: [], env: {}, url: (body.url ?? '').trim() || null, headers: {} }
-          : ov
-            ? {
-                command: ov.command ?? base.command,
-                args: ov.args ?? base.args,
-                env: ov.env ?? base.env,
-                url: ov.url !== undefined ? ov.url : base.url,
-                headers: ov.headers ?? base.headers,
-              }
-            : base;
-        // 槽位按**最终配置**识别（自定义配置改了 env/args/headers → 槽位随之变化）；原生条目按声明
-        const slots = isNativeEntry ? detectSlots(entry) : detectSlotsInConfig(entry, config);
+        const cliTargetUrl = (body.url ?? '').trim() || null;
+        const config = isCliEntry
+          ? {
+              // CLI：二进制来自条目的 cli.bin（本期不接受用户改 bin——条目即模板，改二进制应改条目）；
+              // args 固定为空（argv 由调用方在调用时逐元素给出），env 保留 `${SLOT}` 模板供运行时渲染。
+              command: cliDecl!.bin.trim(),
+              args: [] as string[],
+              env: cliEnvTemplate(cliDecl!.env ?? {}, cliTargetUrl),
+              url: cliTargetUrl,
+              headers: {},
+            }
+          : isNativeEntry
+            ? { command: '', args: [], env: {}, url: (body.url ?? '').trim() || null, headers: {} }
+            : ov
+              ? {
+                  command: ov.command ?? base.command,
+                  args: ov.args ?? base.args,
+                  env: ov.env ?? base.env,
+                  url: ov.url !== undefined ? ov.url : base.url,
+                  headers: ov.headers ?? base.headers,
+                }
+              : base;
+        // CLI 条目的二进制与创建路径同口径校验（fail-closed）：缺失即 400，与 POST /servers 一致，
+        // 否则 Market 会建出"永远跑不起来"的资产（AC-84）。放在落库前，失败不留半成品。
+        if (isCliEntry) {
+          // 授权先于形态（与 POST /servers 同序）：成员见到的 cli 条目（内置 4 条都是白名单内的
+          // kubectl/mysql/redis-cli/kafka-topics.sh）可建，管理员建的任意 bin 条目成员建不了。
+          const authzErr = cliCreateDeniedForMember(p, config.command, settings);
+          if (authzErr) {
+            await auditCliCreateDenied(req, audit, p, config.command, 'POST /market/instantiate');
+            return reply.code(403).send({ code: 403, data: null, message: authzErr });
+          }
+          // 条目自带的 installations 若声明了 args/headers，落库后同样不会被 CLI 链路读取（Spec §4.1.1）：
+          // 内置 4 条 cli 条目是 `{npm:{}}`，但条目可经管理端/种子引入，故按同一判据显式拒绝
+          // （查条目声明而不是展开后的 config——后者对 cli 恒为空，查它等于永远不触发）。
+          const declaredInstall = entry.installations[entry.runtime];
+          const unsupported = cliUnsupportedFieldsError({
+            args: declaredInstall?.args,
+            headers: declaredInstall?.headers,
+          });
+          if (unsupported) return reply.code(400).send({ code: 400, data: null, message: unsupported });
+          const cliErr = cliCreateError(config.command);
+          if (cliErr) {
+            if (cliErr.detail) req.log.error({ detail: cliErr.detail }, 'cli 二进制探测不可用');
+            return reply.code(cliErr.status).send({ code: cliErr.status, data: null, message: cliErr.message });
+          }
+        }
+        // 槽位按**最终配置**识别（自定义配置改了 env/args/headers → 槽位随之变化）；原生 / CLI 条目按声明
+        const slots = isNativeEntry || isCliEntry ? detectSlots(entry) : detectSlotsInConfig(entry, config);
         const credentialSlots = slots.map((s) => ({
           target: s.target,
           name: s.name,
@@ -312,16 +401,19 @@ export function makeMarketRoutes(deps: MarketDeps & { catalogEntries?: CatalogEn
               // 不是这台机器的名字。写进 displayName 会让列表把两个不同资产显示成同一标题。
               displayName: body.displayName?.trim() ? body.displayName.trim() : null,
               description: entry.description,
-              // 原生条目走HTTP原生工具（无子进程）；其余按有无 url 判 stdio/http
-              type: isNativeEntry ? 'native' : config.url ? 'http' : 'stdio',
-              executionMode: isNativeEntry ? 'native' : 'mcp',
+              // 原生 / CLI 条目都不走 MCP 子进程（type 复用 native）；其余按有无 url 判 stdio/http
+              type: isNativeEntry || isCliEntry ? 'native' : config.url ? 'http' : 'stdio',
+              // CLI 是第三种执行模式（ADR-037）：不能落成 native，否则工具聚合会暴露同品类原生工具（越权）
+              executionMode: isCliEntry ? 'cli' : isNativeEntry ? 'native' : 'mcp',
               category: entry.categories[0] ?? 'other',
               command: isNativeEntry ? null : config.command || null,
               args: isNativeEntry ? null : config.args,
               env: isNativeEntry ? null : config.env,
               url: config.url,
               headers: isNativeEntry ? null : ((config.headers && Object.keys(config.headers).length > 0 ? config.headers : null) as object | null),
-              ...(isNativeEntry && body.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : {}),
+              // 私网开关对原生 / CLI 同义（两者都由用户填目标地址）：SSRF 放行后必须落库，
+              // 否则详情页"允许私网访问"显示为否，后续 PATCH 校验也会按 false 重新判定
+              ...((isNativeEntry || isCliEntry) && body.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : {}),
               ...(body.allowInsecureTls === true ? { allowInsecureTls: true } : {}),
               credentialSlots: credentialSlots as never[],
               tags: tagsNorm.tags,
@@ -352,11 +444,12 @@ export function makeMarketRoutes(deps: MarketDeps & { catalogEntries?: CatalogEn
         await governanceAudit(audit, p, 'asset_create', {
           serverId, marketKey: entry.key, name: body.name, bound, missingSlots,
           ...(isNativeEntry ? { executionMode: 'native', url: config.url, allowPrivateNetwork: body.allowPrivateNetwork === true } : {}),
+          ...(isCliEntry ? { executionMode: 'cli', command: config.command, url: config.url, ...(body.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : {}) } : {}),
           ...(defaultGroupName ? { defaultGroup: defaultGroupName } : {}),
         });
 
-        // 异步预热：仅 MCP 资产有实例可预热（原生工具进程内直连，无实例）
-        if (!isNativeEntry) {
+        // 异步预热：仅 MCP 资产有实例可预热（原生工具进程内直连、CLI 一次性进程，均无实例）
+        if (!isNativeEntry && !isCliEntry) {
           void (async () => {
             try {
               const resolved = credentials.resolveSlotValues(serverId, bound);

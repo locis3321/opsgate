@@ -63,9 +63,22 @@ export default function AssetDetail() {
   const canShare = Boolean(asset.data && me.data && (me.data.isAdmin || String(asset.data.ownerId ?? '') === me.data.id));
 
   const isNative = String(asset.data?.executionMode) === 'native';
+  /** cli 是第三种执行模式（ADR-037）：网关本机一次性子进程，与 native/mcp 都不是一回事 */
+  const isCli = String(asset.data?.executionMode) === 'cli';
   /** native 有两种：host=SSH 直连；其余品类=网关内建 HTTP 工具（无主机、无指纹、无实例） */
   const isSshNative = isNative && String(asset.data?.category) === 'host';
-  const isMcp = !isNative;
+  /**
+   * 只有 mcp 走实例池。cli 若落进 isMcp，详情页会去拉实例列表、显示「MCP 实例」，
+   * 而 CLI 根本没有实例（一次性进程）——既是无效请求，也是错误事实。
+   */
+  const isMcp = !isNative && !isCli;
+  /** 执行形态的展示文案（一处定义，标题行与标题工具提示复用） */
+  const execLabel = isCli ? 'CLI 子进程' : isSshNative ? 'SSH 直连' : isNative ? '内建 HTTP 工具' : 'MCP 实例';
+  /** CLI 的注入点：env 模板里 `${NAME}` 引用的槽位名（只给名不给值，ADR-037 §5） */
+  const cliEnvNames = Object.values((asset.data?.env as Record<string, unknown> | null) ?? {})
+    .filter((v): v is string => typeof v === 'string')
+    .flatMap((v) => [...v.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((m) => m[1]!))
+    .filter((n, i, arr) => n !== 'OPSGATE_TARGET' && arr.indexOf(n) === i);
 
   // 实例列表：有 spawning/draining 时 2s 快轮询，稳定后 30s（自适应，省资源）
   const instances = useQuery({
@@ -87,8 +100,10 @@ export default function AssetDetail() {
   const rawTools = useQuery({
     queryKey: ['tools-raw', id],
     queryFn: () => api<{ tools: ToolRow[] }>(`/api/v1/servers/${id}/tools/raw`),
-    // 内建 HTTP 资产也展示工具清单（平台固定，无需拉起实例）
-    enabled: !isSshNative && tab === 'tools',
+    // 内建 HTTP 资产也展示工具清单（平台固定，无需拉起实例）。
+    // cli 不查：该端点对非 mcp 资产回的是「同品类原生工具」，而 cli 只暴露 `${category}_run`——
+    // 直接渲染会把不属于该资产的工具列给用户看（AC-86 的越权负例在 UI 上的对应面）。
+    enabled: !isSshNative && !isCli && tab === 'tools',
     retry: false,
   });
 
@@ -214,7 +229,7 @@ export default function AssetDetail() {
             <StatusBadge kind={vis.kind} label={vis.label} title={vis.hint} />
           </div>
           <p style={{ color: 'var(--muted)', margin: '2px 0 0', fontSize: 'var(--text-sm)' }}>
-            {String(a.category)} · {String(a.executionMode)}（{isSshNative ? 'SSH 直连' : isNative ? '内建 HTTP 工具' : 'MCP 实例'}）· 更新于 {fmtTs(a.updatedAt as number)}
+            {String(a.category)} · {String(a.executionMode)}（{execLabel}）· 更新于 {fmtTs(a.updatedAt as number)}
           </p>
         </div>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -226,10 +241,15 @@ export default function AssetDetail() {
               <Fingerprint size={14} strokeWidth={1.8} /> 信任主机指纹
             </button>
           )}
-          <button className="btn btn-primary" onClick={() => testConn.mutate()} disabled={testConn.isPending} style={{ gap: 6 }} title={isSshNative ? 'SSH 连接并执行一条探测命令' : isNative ? '按品类探测内建 HTTP API（只读端点）' : '拉起 MCP 实例并列出工具'}>
-            {testConn.isPending ? <RefreshCw size={14} strokeWidth={2} className="spin" /> : <Zap size={14} strokeWidth={1.8} />}
-            {testConn.isPending ? '测试中…' : '连通性测试'}
-          </button>
+          {/* cli 不提供连通性测试：/test 只有 mcp 与 native 两条路径，cli 会被当成本品类原生资产探测
+              （redis 去连 Redis、k8s 直接 400），测的不是这个 CLI —— 结论会误导。CLI 的可用性
+              由运行时页的「资产健康」（二进制/沙箱判定）回答，那才是它真实的失败面。 */}
+          {!isCli && (
+            <button className="btn btn-primary" onClick={() => testConn.mutate()} disabled={testConn.isPending} style={{ gap: 6 }} title={isSshNative ? 'SSH 连接并执行一条探测命令' : isNative ? '按品类探测内建 HTTP API（只读端点）' : '拉起 MCP 实例并列出工具'}>
+              {testConn.isPending ? <RefreshCw size={14} strokeWidth={2} className="spin" /> : <Zap size={14} strokeWidth={1.8} />}
+              {testConn.isPending ? '测试中…' : '连通性测试'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -265,7 +285,30 @@ export default function AssetDetail() {
 
       {tab === 'tools' && (
         <div className="card" style={{ padding: 20, display: 'grid', gap: 12 }}>
-          {isSshNative ? (
+          {isCli ? (
+            /* CLI 资产只暴露一个派生工具 `${category}_run`（ADR-037），参数是结构化 argv。
+               不列同品类原生工具：那些工具不接受 argv，也不经由这个资产执行。 */
+            <div style={{ display: 'grid', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Wrench size={15} strokeWidth={1.8} style={{ color: 'var(--accent)' }} />
+                <span style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>工具清单</span>
+                <span className="mono tag">{String(a.category)}_run</span>
+              </div>
+              <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)', lineHeight: 1.7 }}>
+                CLI 资产按品类派生唯一工具 <code className="mono">{String(a.category)}_run</code>，入参为
+                <code className="mono">argv: string[]</code>（逐元素直执行，不经 shell；不要写 shell 语法）。
+                同品类多个 CLI 资产共用此工具名，靠 <code className="mono">asset</code> 入参区分。
+              </div>
+              <div style={{ display: 'grid', gap: 6 }}>
+                <Row k="二进制" v={String(a.command ?? '（未配置）')} mono />
+                <Row k="注入环境变量" v={cliEnvNames.length > 0 ? cliEnvNames.join('、') : '无'} mono />
+                <Row k="凭证槽位" v={((a.credentialSlots as Array<{ name: string }> | null) ?? []).map((s) => s.name).join('、') || '无'} mono />
+              </div>
+              <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)' }}>
+                只展示变量名，不展示值（值来自凭证加密存储，执行时注入子进程）。目标地址：{String(a.url ?? '未设置')}
+              </div>
+            </div>
+          ) : isSshNative ? (
             <div style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)' }}>
               原生 SSH 主机不暴露 MCP 工具清单；其能力由原生工具（host_execute_command / 文件传输）提供。
             </div>
@@ -405,8 +448,9 @@ export default function AssetDetail() {
 
           {/* TLS 校验开关：纯安全策略，与「编辑」里的连接目标分开。
               stdio 型资产（如 kubernetes-mcp-server）同样需要（它自己连集群 API）；
-              SSH 主机不适用（ssh2 走主机指纹）。 */}
-          {!isSshNative && (
+              SSH 主机不适用（ssh2 走主机指纹）；CLI 也不适用——TLS 由被执行的二进制自己决定，
+              网关不参与它的 TLS 握手，给了开关等于一个不生效的承诺。 */}
+          {!isSshNative && !isCli && (
             <div style={{ borderTop: '1px solid var(--border-soft)', paddingTop: 12, display: 'grid', gap: 6 }}>
               <span style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)', fontWeight: 500 }}>TLS 校验</span>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
@@ -448,7 +492,7 @@ export default function AssetDetail() {
                 <div style={{ color: 'var(--fg-2)', fontSize: 'var(--text-xs)', lineHeight: 1.7 }}>
                   将一并删除：{boundCount} 条凭证绑定
                   {slotInlineCount > 0 ? `、${slotInlineCount} 个直填值` : ''}
-                  {' '}与全部分组归属；该资产的实例会被立即回收。
+                  {' '}与全部分组归属；{isCli ? '该资产的在飞 CLI 进程不受影响（进程不依赖资产行），但之后无法再调用。' : '该资产的实例会被立即回收。'}
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button className="btn btn-danger" onClick={() => del.mutate()} disabled={del.isPending}>

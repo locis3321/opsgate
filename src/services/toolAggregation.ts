@@ -12,17 +12,18 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import * as schema from '../db/schema.js';
 import { buildPlan, transportOf, type InstancePlan } from './instancePlan.js';
 import type { InstancePool } from './instancePool.js';
-import type { NativeToolDefinition } from '../framework/types.js';
+import type { ExecutionMode, NativeToolDefinition } from '../framework/types.js';
 import { validateDescription } from '../framework/validate.js';
 import type { Settings } from '../config/settings.js';
 import { DEFAULT_WORKFLOW_INSTRUCTIONS } from '../config/settingsSchema.js';
 import type { ResolvedCredential } from './credentials.js';
+import { cliExposedTool } from './cliTool.js';
 
 export interface ExposedTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  source: 'native' | 'derived';
+  source: 'native' | 'derived' | 'cli';
   category: string;
   /** 实现标识：opsgate（原生）或社区命令短前缀 */
   impl: string;
@@ -36,6 +37,8 @@ export interface VisibleAsset {
   name: string;
   category: string;
   tags: string[];
+  /** 执行方式：发现链路据此区分 native / mcp / cli（§3.2 / ADR-037） */
+  executionMode: ExecutionMode;
 }
 
 export class TooManyToolsError extends Error {}
@@ -149,7 +152,15 @@ export async function aggregateTools(deps: AggregationDeps, input: AggregateInpu
     if (!a.enabled) continue;
     if (!(await deps.isVisible(a, input.principal))) continue;
     if (input.tag && !((a.tags as string[] | null) ?? []).includes(input.tag)) continue;
-    assets.push({ id: a.id, name: a.name, category: a.category, tags: (a.tags as string[] | null) ?? [] });
+    assets.push({
+      id: a.id,
+      name: a.name,
+      category: a.category,
+      tags: (a.tags as string[] | null) ?? [],
+      // servers.execution_mode 是 text 列（无 DB 级枚举约束），这里收窄成联合类型；
+      // 只有 native / mcp / cli 三种定义，其余值按 native 处理（与 nativeDispatch 同一口径）。
+      executionMode: a.executionMode === 'mcp' || a.executionMode === 'cli' ? a.executionMode : 'native',
+    });
   }
 
   // 工具名唯一性登记表（name → impl）：原生与派生共用同一张表（ADR-032 · P1）。
@@ -228,7 +239,7 @@ export async function aggregateTools(deps: AggregationDeps, input: AggregateInpu
   const platform: ExposedTool = {
     name: 'opsgate_list_assets',
     description:
-      '列出当前连接可见的资产清单（id/name/category/tags），也是 asset 参数取值的唯一合法来源。Use when: 用户说"有哪些主机/数据库"、或在调用任何 *_ 工具前确认目标资产。Required: 无参数即可调用；返回的 id 用于后续工具 asset 参数，不要编造。',
+      '列出当前连接可见的资产清单（id/name/displayName/category/tags），也是 asset 参数取值的唯一合法来源。Use when: 用户说"有哪些主机/数据库"、或调用任何 *_ 工具前确认目标。Required: 无参数即可调用；后续 asset 参数可直接填返回的 name（或 id），不必记 id，不要编造。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -248,7 +259,7 @@ export async function aggregateTools(deps: AggregationDeps, input: AggregateInpu
         '查看单个资产详情：类型/执行模式/主机配置/槽位绑定状态/可见范围/所属分组（不含任何密钥值）。Use when: 确认某个资产能否操作、槽位是否已绑定、属于哪个分组。Required: 先调用 opsgate_list_assets 取资产 id 作为 asset 参数，不要编造。',
       inputSchema: {
         type: 'object',
-        properties: { asset: { type: 'string', description: '资产 id 或名称（取自 opsgate_list_assets）' } },
+        properties: { asset: { type: 'string', description: '资产 id / name / displayName（取自 opsgate_list_assets）' } },
         required: ['asset'],
       },
       source: 'derived',
@@ -286,7 +297,7 @@ export async function aggregateTools(deps: AggregationDeps, input: AggregateInpu
         '列出某个资产可用的工具名与参数 schema（只读，不含任何密钥值）。Use when: 已用 opsgate_list_assets 选定资产、准备调用前，先确认这个资产能做哪些操作、参数怎么填。Required: asset 取自 opsgate_list_assets，不要编造。',
       inputSchema: {
         type: 'object',
-        properties: { asset: { type: 'string', description: '资产 id 或名称（取自 opsgate_list_assets）' } },
+        properties: { asset: { type: 'string', description: '资产 id / name / displayName（取自 opsgate_list_assets）' } },
         required: ['asset'],
       },
       source: 'derived',
@@ -301,7 +312,7 @@ export async function aggregateTools(deps: AggregationDeps, input: AggregateInpu
       inputSchema: {
         type: 'object',
         properties: {
-          asset: { type: 'string', description: '资产 id 或名称（取自 opsgate_list_assets）' },
+          asset: { type: 'string', description: '资产 id / name / displayName（取自 opsgate_list_assets）' },
           tool: { type: 'string', description: '工具名，取值来自 opsgate_list_asset_tools（如 execute_command / query）' },
           args: { type: 'object', description: '该工具的参数对象（不含 asset，框架会自动注入）' },
         },
@@ -408,6 +419,35 @@ export async function toolsOfAsset(
   const row = await deps.db.select().from(schema.servers).where(eq(schema.servers.id, assetId)).get();
   if (!row || !row.enabled) return { tools: [], violations: [] };
   const violations: string[] = [];
+
+  // CLI 分支必须先于 native 判断（设计说明 §4.2）：条件反过来写会让 category=redis 的 CLI 资产
+  // 被判成"原生 redis 资产"，暴露并对接进程内 redis_command / redis_info / redis_slowlog，
+  // 等于绕过"CLI 只能跑它自己配置的那个二进制"这条边界。
+  if (row.executionMode === 'cli') {
+    // command 缺失是必填业务事实缺失，cliExposedTool 会抛错。这里必须自己接住：
+    // 让它冒到 listAssetTools / invokeOnAsset 外层会变成 JSON-RPC 协议级 -32603，
+    // 调用方分不清"这台资产没配好"和"网关自己崩了"。改按 R 校验违规同口径报出，
+    // 由调用方转成 -32006 + 原因（一个工具都没有的资产本来就该显式说原因）。
+    try {
+      const t = cliExposedTool({
+        id: row.id,
+        name: row.name,
+        category: row.category,
+        command: row.command,
+      });
+      return {
+        tools: [{
+          name: t.name,
+          description: t.description,
+          inputSchema: withAssetParam(t.inputSchema, row.category) as Record<string, unknown>,
+        }],
+        violations,
+      };
+    } catch (err) {
+      violations.push(`cli:${row.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return { tools: [], violations };
+    }
+  }
 
   if (row.executionMode !== 'mcp') {
     const disabled = new Set<string>(deps.settings.get<readonly string[]>('native_tools.disabled') ?? []);

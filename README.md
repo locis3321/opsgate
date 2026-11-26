@@ -77,9 +77,12 @@ This path **does not depend on the client consuming `notifications/tools/list_ch
 |---|---|---|---|
 | `host` (Linux host) | In-process ssh2 connection pool | ~2–5 MB | 100–500 ms |
 | `zabbix` / `rocketmq` / `nacos` | In-process HTTP tools | No resident process | Direct request |
+| **`cli` (binaries: kubectl / mysql / redis-cli / …)** | **One-shot sandboxed subprocess, `argv` straight to the binary (no shell)** | **0 resident (one process per call)** | **process spawn, ~tens of ms (estimate)** |
 | Other community MCP implementations | Spawned subprocess (stdio / http / sse) | ~40–120 MB | 1–30 s (may need to fetch packages) |
 
 Only categories that must reuse a community implementation go through the instance pool. The pool enforces a global budget (instance count / weighted memory / spawn concurrency), idle reclamation, and backoff rebuild on crash.
+
+**CLI assets** are the third execution mode (`execution_mode='cli'`): the asset declares a binary, the caller passes `argv: string[]`, and the gateway runs it once on the gateway host under a `bwrap` sandbox (Linux; refuses to run — never degrades to bare execution — when `bwrap` is unavailable). Credentials reach the process only through environment variables or 0600 temp files, never through `argv`. Each CLI asset exposes exactly one tool, `${category}_run`, and CLI tools are reached through the meta-tool chain only (`opsgate_list_assets` → `opsgate_list_asset_tools` → `opsgate_invoke`), so they never inflate `tools/list`. Details in Spec §5.9.11 and ADR-037.
 
 ### 3. Three-tier configuration
 
@@ -335,7 +338,7 @@ frontend/
 └── src/pages/              18 admin console pages
 ```
 
-**Key technical decisions** (full records, including ADR-001 to ADR-036, are in `docs/opsgate-spec-v1.md` §10)
+**Key technical decisions** (full records in `docs/adr-*.md`)
 
 | Decision | Content |
 |---|---|
@@ -346,6 +349,7 @@ frontend/
 | ADR-033 | Meta-tool `opsgate_invoke`, independent of client tool refresh |
 | ADR-035 | Asset shape and execution config are immutable after creation |
 | ADR-036 | Native ops capability expansion (Redis/Kafka connectors, raw tools) |
+| ADR-037 | CLI assets: `argv` direct execution, `bwrap` sandbox, credentials via env/file only |
 
 ---
 
@@ -423,7 +427,7 @@ pnpm run seed                # write seed data (built-in rules, Market catalog)
 
 | Document | Contents |
 |---|---|
-| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | Authoritative design: data model, tool exposure, security constraints, API, acceptance criteria, and all architecture decision records (ADR-001 to ADR-036) in §10 |
+| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | Authoritative design: data model, tool exposure, security constraints, API, acceptance criteria, and all architecture decision records (ADR-001 to ADR-037) in §10 |
 | [`docs/deploy.md`](docs/deploy.md) | Deployment, backup, migration, known limitations |
 
 > The documents above are written in Chinese.
@@ -437,6 +441,7 @@ pnpm run seed                # write seed data (built-in rules, Market catalog)
 - **Output truncation**: 4 KB by default, beyond which `truncated: true` is set; narrow the command yourself if you need the full content
 - **File transfer relies on the gateway's staging disk**: very large files must be transferred in batches
 - **Windows target hosts do not support native SSH execution**
+- **CLI assets (ADR-037)**: Linux only; binaries must be pre-installed on the host in this release (the gateway does not install them, so a container deployment needs its own derived image with kubectl / mysql / redis-cli installed); execution goes through a `bwrap` sandbox and is refused when `bwrap` is unavailable; the built-in CLI danger rules are seeded once (`.guard-rules-seeded`) so an upgraded database does not pick up newly added rules until an admin adds or re-seeds them
 - **Cross-month audit queries scan tables**: with partitioned tables, cross-month search has a performance ceiling
 - Bulk import (CSV) and bulk instantiation are v1.1 and not included in v1
 

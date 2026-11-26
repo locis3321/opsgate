@@ -151,6 +151,38 @@ describe('契约测试遍历注册表（AC-51）', () => {
     expect(out.data).toMatchObject({ content: { echo: 'hello', host: 'web-01' } });
     expect(calls.auditFill).toBeGreaterThan(0);
   });
+
+  it('场景 E：execute 抛错 → 仍释放连接（release 调用 1 次），错误映射 -32002', async () => {
+    await buildTestRegistry();
+    const { services } = makeServices();
+    let released = 0;
+    registerConnector({
+      type: 'mock',
+      acquire: async () => ({ __stub: true }),
+      release: () => { released++; },
+      invalidate: () => undefined,
+      stats: () => ({ active: 0, idle: 0, total: 0 }),
+    });
+    const bad: NativeToolDefinition = {
+      ...mockEcho,
+      execute: async () => { throw new Error('boom'); },
+    };
+    const out = await dispatchNativeTool(bad, { asset: 'a-1', message: 'x' }, PRINCIPAL, services);
+    expect(out.ok).toBe(false);
+    expect(out.code).toBe(-32002);
+    expect(released).toBe(1);
+  });
+
+  it('场景 F：回填审计二次失败不逃逸（成功路径仍返回 ok）', async () => {
+    const tools = await buildTestRegistry();
+    const { services } = makeServices({
+      fillAudit: async () => { throw new Error('fill down'); },
+    });
+    const tool = tools.find((t) => t.id === 'mock.echo')!;
+    await expect(
+      dispatchNativeTool(tool, { asset: 'a-1', message: 'ok' }, PRINCIPAL, services),
+    ).resolves.toMatchObject({ ok: true });
+  });
 });
 
 describe('R1–R8 描述规范校验器', () => {

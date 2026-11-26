@@ -188,10 +188,12 @@ function CredentialPickerPanel({
  * 下拉用 portal 渲染到 body：弹窗卡片是 overflow:auto 滚动容器，绝对定位会被裁剪。
  */
 export default function SlotValueEditor({
-  slotName, label, isFile, candidates, value, bound, dirty,
+  slotName, label, isFile, note, candidates, value, bound, dirty,
   onValueChange, onPick, onUnbind, onCommitValue, mode = 'full',
 }: {
   slotName: string; label: string; isFile?: boolean;
+  /** 槽位属性的补充说明（如「自动判定为文件」），渲染在标签下的小字 */
+  note?: string;
   candidates: CredCandidate[];
   value: string;
   bound?: { id: string; name: string; valueHint: string };
@@ -282,6 +284,7 @@ export default function SlotValueEditor({
         {label && label !== slotName ? `${label}（${slotName}）` : slotName}
         {isFile ? ' · 文件' : ''}
       </label>
+      {note && <div style={{ color: 'var(--meta)', fontSize: 11, lineHeight: 1.5 }}>{note}</div>}
       <div ref={rowRef} style={{ display: 'flex', gap: 4 }}>
         <input
           className="input"

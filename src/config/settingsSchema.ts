@@ -247,6 +247,19 @@ export const SETTINGS_SCHEMA: readonly SettingDef[] = [
     secret: false,
   },
   {
+    key: 'cli.member_allowed_binaries',
+    type: 'json',
+    // 默认覆盖一期实际要用的运维工具（kubectl / mysql / redis-cli / kafka-topics.sh / mc / jq）。
+    // 这是**策略值**不是结构契约：不同环境预装的工具不同（有的没有 mc/jq），因此做成 L1 可改。
+    default: ['kubectl', 'mysql', 'redis-cli', 'kafka-topics.sh', 'mc', 'jq'],
+    category: 'tools',
+    label: '成员可建 CLI 二进制白名单',
+    description:
+      '成员创建 CLI 资产时只允许这些二进制（按 basename 比对，/usr/local/bin/kubectl 视为 kubectl）；管理员不受限。空数组 = 成员不能建任何 CLI 资产',
+    requiresRestart: false,
+    secret: false,
+  },
+  {
     key: 'transfer.max_file_bytes',
     type: 'size',
     default: 209715200,

@@ -16,6 +16,7 @@ import { canOnAsset } from './authzBuilder.js';
 import { redactValue, truncateString } from './audit.js';
 import { CredentialService, type ResolvedCredential } from './credentials.js';
 import { evaluateRules, loadActiveRules } from './guardRules.js';
+import { CliConfigError } from './cliRunner.js';
 import { TransferLimitError, TransferTokenError, TransferSizeMismatchError } from './transfer.js';
 
 export interface NativeDispatchDeps {
@@ -51,7 +52,9 @@ export function makeNativeDispatchServices(deps: NativeDispatchDeps): DispatchSe
         name: match.name,
         category: match.category,
         ownerId: match.ownerId,
-        executionMode: match.executionMode === 'mcp' ? 'mcp' : 'native',
+        // 不归一化：cli 归一成 native 会让下游（如 dispatch 的执行方式闸门）看不出这是 CLI 资产，
+        // 等于让"同品类原生工具执行 CLI 资产"重新变得可能。
+        executionMode: match.executionMode === 'mcp' ? 'mcp' : match.executionMode === 'cli' ? 'cli' : 'native',
         hostConn: (match.hostConn ?? null) as AssetView['hostConn'],
         url: match.url,
         // 自签证书资产：让 HTTP connector 改用不校验证书的 fetch
@@ -164,6 +167,12 @@ export function makeNativeDispatchServices(deps: NativeDispatchDeps): DispatchSe
       if (err instanceof TransferLimitError) return { code: ERROR_CODES.transferLimit, message: err.message };
       if (err instanceof TransferTokenError) return { code: ERROR_CODES.unauthorized, message: err.message };
       if (err instanceof TransferSizeMismatchError) return { code: ERROR_CODES.transferLimit, message: err.message };
+      // CLI 配置类失败（bwrap 不可用 / command 缺失 / 槽位未绑定 / 槽位名非法）是**永久**错误：
+      // 落进下面的 -32002（"实例忙，缩小范围重试"）会让 agent 死循环重试。
+      // 这里只按显式类型分流，不动其它 -32002 路径（瞬时忙/超时语义原样保留）。
+      if (err instanceof CliConfigError) {
+        return { code: ERROR_CODES.settingsInvalid, message: `配置类错误（不可重试）：${err.message}` };
+      }
       if (err instanceof Error && /指纹|未信任|Host denied/.test(err.message)) {
         // 拒绝动作正确；文案需要面向调用方（§6：说清什么错了 + 下一步）
         return { code: ERROR_CODES.instanceBusy, message: '主机指纹校验失败：目标主机未信任或指纹已变更，请先在管理端重新 trust-fingerprint' };

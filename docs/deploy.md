@@ -53,3 +53,4 @@ export OPSGATE_BIND=127.0.0.1 OPSGATE_PORT=8080 OPSGATE_LOG_LEVEL=info
 - uvx 实例树内核外内存 ~39MB/实例（实测）；迁移/审计跨月查询按表扫描（上限注明）
 - 审计保留 12 个月：**超期归档作业已实现**（`audit.retention_months`，启动即扫 + 每小时；运行参数页可调）
 - Market 目录与单条实例化属 v1（ADR-025）；`batch-instantiate` / 批量导入 / `opsgate_request_access` 属 v1.1
+- **CLI 资产（ADR-037）**：仅 Linux 部署；一期二进制需**主机预装**（网关不安装），容器部署需自建镜像预装 kubectl / mysql / redis-cli / kafka-topics.sh；执行经 `bwrap` 沙箱（镜像需含 bubblewrap），不可用即拒绝执行；二进制目录必须与 `OPSGATE_DATA_DIR` 物理分开（沙箱用 `--tmpfs` 遮 dataDir）；内置 CLI 危险规则只播种一次（`.guard-rules-seeded`），升级后需管理员在安全策略页补或显式重播种

@@ -77,9 +77,12 @@ opsgate_invoke({asset, tool, args}) → 执行
 |---|---|---|---|
 | `host`（Linux 主机） | 进程内 ssh2 连接池 | ~2–5 MB | 100–500 ms |
 | `zabbix` / `rocketmq` / `nacos` | 进程内 HTTP 工具 | 无常驻 | 直接请求 |
+| **`cli`（kubectl / mysql / redis-cli 等二进制）** | **一次性沙箱子进程，`argv` 直达二进制（不经 shell）** | **无常驻（一次调用一个进程）** | **进程拉起，数十 ms** |
 | 其他社区 MCP 实现 | spawn 子进程（stdio / http / sse） | ~40–120 MB | 1–30 s（需拉包） |
 
 只有必须复用社区实现的品类才走实例池。实例池有全局预算（实例数 / 加权内存 / 拉起并发三重门闩）、空闲回收、崩溃退避重建。
+
+**CLI 资产**是第三种执行模式（`execution_mode='cli'`）：资产声明一个二进制，调用方按元素传 `argv: string[]`，网关在**网关本机**经 `bwrap` 沙箱跑一次性进程（仅 Linux；bwrap 不可用即拒绝执行，**不降级裸跑**）。凭证只经环境变量或 0600 临时文件注入，绝不进 `argv`。每个 CLI 资产只暴露一个工具 `${category}_run`，且只经元工具链（`opsgate_list_assets` → `opsgate_list_asset_tools` → `opsgate_invoke`）触达，不进 `tools/list`。详见 Spec §5.9.11 与 ADR-037。
 
 ### 3. 三档配置
 
@@ -334,7 +337,7 @@ frontend/
 └── src/pages/              18 个控制台页面
 ```
 
-**关键技术决策**（完整记录含 ADR-001 至 ADR-036，见 `docs/opsgate-spec-v1.md` §10）
+**关键技术决策**（完整记录见 `docs/adr-*.md`）
 
 | 决策 | 内容 |
 |---|---|
@@ -345,6 +348,7 @@ frontend/
 | ADR-033 | 元工具 `opsgate_invoke`，不依赖客户端刷新工具目录 |
 | ADR-035 | 资产形态与执行配置创建后不可改 |
 | ADR-036 | 原生运维能力扩容（Redis/Kafka connector、raw 工具准入） |
+| ADR-037 | CLI 类型资产：`argv` 直执行、`bwrap` 沙箱、凭证只经 env/文件 |
 
 ---
 
@@ -422,7 +426,7 @@ pnpm run seed                # 写入种子数据（内置规则、Market 目录
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | 设计权威：数据模型、工具暴露、安全约束、API、验收标准，以及 ADR-001 至 ADR-036 全部架构决策记录（§10） |
+| [`docs/opsgate-spec-v1.md`](docs/opsgate-spec-v1.md) | 设计权威：数据模型、工具暴露、安全约束、API、验收标准，以及 ADR-001 至 ADR-037 全部架构决策记录（§10） |
 | [`docs/deploy.md`](docs/deploy.md) | 部署、备份、迁移、已知限制 |
 
 ---
@@ -434,6 +438,7 @@ pnpm run seed                # 写入种子数据（内置规则、Market 目录
 - **输出截断**：default 4 KB，超出置 `truncated: true`；需要完整内容时自行收窄命令
 - **文件传输依赖网关暂存盘**：超大文件需分批
 - **Windows 目标主机不支持原生 SSH 执行**
+- **CLI 资产（ADR-037）**：仅 Linux；一期二进制需**主机预装**（网关不负责安装，容器部署需自建镜像并预装 kubectl / mysql / redis-cli 等）；执行经 `bwrap` 沙箱，bwrap 不可用即拒绝执行；内置 CLI 危险规则只播种一次（`.guard-rules-seeded`），存量库升级后需管理员手工补或显式重播种
 - **审计跨月查询按表扫描**：分表设计下跨月检索有性能上限
 - 批量导入（CSV）、批量实例化属 v1.1，未包含在 v1
 

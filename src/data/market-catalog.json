@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "note": "v1 仅收录实测通过条目（2026-10-21 逐条跑 tools/list 校准；版本用 --from/pinned == 与 @x.y.z 固化）。13 条实测通过（AC-62 ≥12 已满足）。未收录（实测不可用）：mcp-server-sqlite/weather/nmap/everything（与 mcp SDK API 不兼容）、官方 npm server-fetch/git/sqlite/time（npm 已下架）、mcp-server-kubernetes/postgres（需 kubeconfig/DB URL 启动即退）、server-puppeteer（启动后 listTools 超时）。2026-11-05 修正：mysql-mcp-server 原固定 0.1.4 在 PyPI 不存在（可用 0.1.0/0.1.2/0.2.x/0.3.x/0.4.x），且 0.3.1 缺 dotenv 依赖、0.1.2 与新版 MCP SDK 不兼容（list_resources 缺失），实际可用版本为 0.4.5，已改固定；其余 12 条固定版本经 PyPI/npm registry 复核均存在。 2026-11-23 新增 cr7258-elasticsearch-mcp-server（社区增强版，官方 @elastic/mcp-server-elasticsearch 已弃用）：多出写入类与 general_api_request 兜底工具。 2026-11-24 新增 redis-native / kafka-native 两条原生条目（ADR-036 落地：原生命令能力在 Market 里可直接选，不必走自定义表单）。",
+  "note": "v1 仅收录实测通过条目（2026-10-21 逐条跑 tools/list 校准；版本用 --from/pinned == 与 @x.y.z 固化）。13 条实测通过（AC-62 ≥12 已满足）。未收录（实测不可用）：mcp-server-sqlite/weather/nmap/everything（与 mcp SDK API 不兼容）、官方 npm server-fetch/git/sqlite/time（npm 已下架）、mcp-server-kubernetes/postgres（需 kubeconfig/DB URL 启动即退）、server-puppeteer（启动后 listTools 超时）。2026-11-05 修正：mysql-mcp-server 原固定 0.1.4 在 PyPI 不存在（可用 0.1.0/0.1.2/0.2.x/0.3.x/0.4.x），且 0.3.1 缺 dotenv 依赖、0.1.2 与新版 MCP SDK 不兼容（list_resources 缺失），实际可用版本为 0.4.5，已改固定；其余 12 条固定版本经 PyPI/npm registry 复核均存在。 2026-11-23 新增 cr7258-elasticsearch-mcp-server（社区增强版，官方 @elastic/mcp-server-elasticsearch 已弃用）：多出写入类与 general_api_request 兜底工具。 2026-11-24 新增 redis-native / kafka-native 两条原生条目（ADR-036 落地：原生命令能力在 Market 里可直接选，不必走自定义表单）。 2026-11-25 新增 kubectl-cli / mysql-cli / redis-cli-cli / kafka-topics-cli 四条 CLI 条目（ADR-037：argv 直执行，二进制要求主机预装，实例化时 fail-closed 校验）。",
   "items": [
     {
       "key": "baota-mcp-server",
@@ -600,6 +600,122 @@
       },
       "defaultGroup": "zabbix",
       "executionMode": "native",
+      "installations": {
+        "npm": {}
+      }
+    },
+    {
+      "key": "kubectl-cli",
+      "name": "kubectl",
+      "displayName": "kubectl（平台 CLI）",
+      "description": "通过网关内 kubectl 执行集群操作（argv 直执行，不经 shell，参数逐个作为 kubectl 的参数）。一期要求主机预装 kubectl，缺失时创建即拒绝。槽位 KUBECONFIG 会落为 0600 临时文件并以环境变量注入；集群由 kubeconfig 决定，本条目没有承接地址的环境变量，故不需要填写目标地址。",
+      "repository": "https://kubernetes.io/docs/reference/kubectl/",
+      "categories": [
+        "k8s"
+      ],
+      "tags": [
+        "k8s",
+        "kubectl",
+        "cli"
+      ],
+      "runtime": "npm",
+      "executionMode": "cli",
+      "cli": {
+        "bin": "kubectl",
+        "env": {
+          "KUBECONFIG": "${KUBECONFIG}"
+        }
+      },
+      "slotLabels": {
+        "KUBECONFIG": "kubeconfig 文件"
+      },
+      "defaultGroup": "k8s",
+      "installations": {
+        "npm": {}
+      }
+    },
+    {
+      "key": "mysql-cli",
+      "name": "mysql",
+      "displayName": "mysql（平台 CLI）",
+      "description": "通过网关内 mysql 客户端执行 SQL 与运维查询（argv 直执行，不经 shell）。一期要求主机预装 mysql 客户端，缺失时创建即拒绝。密码走槽位 MYSQL_PWD，渲染为该环境变量（mysql 客户端原生支持，不出现在 argv 与审计里）；目标实例地址填在 URL 字段，渲染为环境变量 MYSQL_HOST（填主机名，如 db.example.invalid；端口由调用方在 argv 里用 --port 指定），留空则由 mysql 客户端按默认（本机）连接。",
+      "repository": "https://dev.mysql.com/doc/refman/8.4/en/mysql.html",
+      "categories": [
+        "mysql"
+      ],
+      "tags": [
+        "mysql",
+        "database",
+        "cli"
+      ],
+      "runtime": "npm",
+      "executionMode": "cli",
+      "cli": {
+        "bin": "mysql",
+        "env": {
+          "MYSQL_HOST": "${OPSGATE_TARGET}",
+          "MYSQL_PWD": "${MYSQL_PWD}"
+        }
+      },
+      "slotLabels": {
+        "MYSQL_PWD": "MySQL 密码"
+      },
+      "defaultGroup": "mysql",
+      "installations": {
+        "npm": {}
+      }
+    },
+    {
+      "key": "redis-cli-cli",
+      "name": "redis-cli",
+      "displayName": "redis-cli（平台 CLI）",
+      "description": "通过网关内 redis-cli 执行 Redis 原生命令与排障（argv 直执行，不经 shell）。一期要求主机预装 redis-cli，缺失时创建即拒绝。密码走槽位 REDISCLI_AUTH，渲染为该环境变量（redis-cli 原生支持，不出现在 argv 与审计里）；目标实例由调用方在 argv 中给出连接参数（如 -h cache.example.invalid -p 6379），本条目没有承接地址的环境变量。",
+      "repository": "https://redis.io/docs/latest/develop/tools/cli/",
+      "categories": [
+        "redis"
+      ],
+      "tags": [
+        "redis",
+        "cache",
+        "cli"
+      ],
+      "runtime": "npm",
+      "executionMode": "cli",
+      "cli": {
+        "bin": "redis-cli",
+        "env": {
+          "REDISCLI_AUTH": "${REDISCLI_AUTH}"
+        }
+      },
+      "slotLabels": {
+        "REDISCLI_AUTH": "Redis 认证密码"
+      },
+      "defaultGroup": "redis",
+      "installations": {
+        "npm": {}
+      }
+    },
+    {
+      "key": "kafka-topics-cli",
+      "name": "kafka-topics.sh",
+      "displayName": "kafka-topics.sh（平台 CLI）",
+      "description": "通过网关内 kafka-topics.sh 管理主题（argv 直执行，不经 shell）：列举/描述/创建/扩分区/删除。一期要求主机预装 Kafka 命令行工具，缺失时创建即拒绝。本条目不注入环境变量，broker 地址等参数由调用方在 argv 中显式给出（如 --bootstrap-server kafka.example.invalid:9092）。",
+      "repository": "https://kafka.apache.org/documentation/#basic_ops",
+      "categories": [
+        "kafka"
+      ],
+      "tags": [
+        "kafka",
+        "mq",
+        "cli"
+      ],
+      "runtime": "npm",
+      "executionMode": "cli",
+      "cli": {
+        "bin": "kafka-topics.sh"
+      },
+      "slotLabels": {},
+      "defaultGroup": "kafka",
       "installations": {
         "npm": {}
       }

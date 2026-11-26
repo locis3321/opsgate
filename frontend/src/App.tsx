@@ -85,17 +85,30 @@ function ThemeToggle() {
 function NotificationBell() {
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
+  // 已读水位（localStorage 持久化）：只计"该时间之后"的高危事件为未读，点开面板即更新
+  const [lastReadTs, setLastReadTs] = useState<number>(() => Number(localStorage.getItem('opsgate-notify-read-ts') ?? 0) || 0);
   const q = useQuery({
     queryKey: ['notify-highrisk'],
     queryFn: () => api<{ items: Array<Record<string, unknown>>; total: number }>('/api/v1/audit?risk=high&page=1'),
     refetchInterval: 60_000,
   });
   const items = q.data?.items ?? [];
-  // 角标用后端 total（非当页条数）；后端单次扫描上限 300，超过时显示 300+
-  const count = q.data?.total ?? 0;
+  // 角标 = 当页高危事件中 ts 晚于已读水位的条数（不是全历史 total，否则只增不减）
+  const unread = items.filter((it) => Number(it.ts ?? 0) > lastReadTs).length;
+  const count = unread;
+  const markRead = () => {
+    const now = Date.now();
+    setLastReadTs(now);
+    localStorage.setItem('opsgate-notify-read-ts', String(now));
+  };
   return (
     <div style={{ position: 'relative' }}>
-      <button className="icon-btn" onClick={() => setOpen((v) => !v)} title="最近高危事件" aria-label={`通知（${count} 条高危）`}>
+      <button
+        className="icon-btn"
+        onClick={() => { setOpen((v) => !v); if (!open) markRead(); }}
+        title="最近高危事件"
+        aria-label={`通知（${count} 条未读高危）`}
+      >
         <Bell size={15} strokeWidth={1.8} />
         {count > 0 && <span className="count">{count > 99 ? '99+' : count}</span>}
       </button>
@@ -103,11 +116,18 @@ function NotificationBell() {
         <>
           <div className="scrim" style={{ background: 'transparent' }} onClick={() => setOpen(false)} aria-hidden />
           <div className="card" style={{ position: 'absolute', right: 0, top: 'calc(100% + 8px)', width: 320, zIndex: 120, padding: 0, boxShadow: 'var(--shadow-lg)' }}>
-            <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', fontSize: 'var(--text-sm)', fontWeight: 600 }}>
-              最近高危事件
+            <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', fontSize: 'var(--text-sm)', fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>最近高危事件</span>
+              <button
+                onClick={markRead}
+                style={{ background: 'none', border: 'none', color: 'var(--muted)', fontSize: 'var(--text-xs)', cursor: 'pointer', padding: 0 }}
+                title="全部标为已读"
+              >
+                全部已读
+              </button>
             </div>
             <div style={{ maxHeight: 300, overflow: 'auto', padding: 6 }}>
-              {count === 0 && <div style={{ padding: 12, color: 'var(--meta)', fontSize: 'var(--text-sm)', textAlign: 'center' }}>暂无高危事件</div>}
+              {items.length === 0 && <div style={{ padding: 12, color: 'var(--meta)', fontSize: 'var(--text-sm)', textAlign: 'center' }}>暂无高危事件</div>}
               {items.slice(0, 8).map((it, i) => (
                 <button
                   key={String(it.id ?? i)}
@@ -118,6 +138,9 @@ function NotificationBell() {
                     nav(it.server_id ? `/audit?asset=${String(it.server_id)}` : '/audit');
                   }}
                 >
+                  {Number(it.ts ?? 0) > lastReadTs && (
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--warn)', flexShrink: 0, marginRight: 6 }} aria-label="未读" />
+                  )}
                   <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {String(it.username ?? '—')} · {String(it.tool ?? it.action ?? '')}
                   </span>

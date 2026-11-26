@@ -42,6 +42,12 @@ export default function AssetEditModal({
 }) {
   const qc = useQueryClient();
   const isSsh = asset.executionMode === 'native' && asset.category === 'host';
+  /**
+   * CLI 资产（ADR-037）的 url 是**目标地址**（`host:port`，由 CliRunner 渲染进 env 的
+   * `${OPSGATE_TARGET}`），不是 MCP 端点。placeholder 必须跟着变：写成 `http://host:port/mcp`
+   * 会引导用户填一个 CLI 根本不会用的 URL 形态（mysql/kubectl 要的是 host:port）。
+   */
+  const isCli = asset.executionMode === 'cli';
   const hasUrl = !isSsh && asset.type !== 'stdio';
   const hc = (asset.hostConn ?? {}) as Record<string, unknown>;
 
@@ -141,8 +147,19 @@ export default function AssetEditModal({
           {hasUrl && (
             <>
               <Field label="连接地址" hint="内网地址需同时勾选「允许私网访问」；变更会回收运行实例">
-                <input className="input mono" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://host:port/mcp" />
+                <input
+                  className="input mono"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder={isCli ? 'db.example.invalid:3306' : 'http://host:port/mcp'}
+                />
               </Field>
+              {isCli && (
+                <div style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)', lineHeight: 1.6 }}>
+                  CLI 资产的目标地址渲染进 env 模板里的 <code className="mono">{'${OPSGATE_TARGET}'}</code>（如 MYSQL_HOST），
+                  形如 host:port，不是 MCP 端点 URL。留空则该项不注入，由 CLI 自己的默认值生效。
+                </div>
+              )}
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
                 <input type="checkbox" checked={allowPrivate} onChange={(e) => setAllowPrivate(e.target.checked)} />
                 允许私网访问

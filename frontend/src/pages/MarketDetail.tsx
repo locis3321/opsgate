@@ -10,7 +10,9 @@ import { detectSlots, SLOT_PLACEHOLDER_RE, slotLabel } from '../slots';
 
 interface Detail {
   key: string; displayName: string; description: string; repository: string; runtime: string;
-  executionMode?: 'mcp' | 'native';
+  executionMode?: 'mcp' | 'native' | 'cli';
+  /** CLI 条目的执行声明（二进制 + 环境变量模板）：实例化不可改，仅用于说明 */
+  cli?: { bin: string; env?: Record<string, string>; urlEnv?: string };
   categories?: string[];
   preview: {
     command: string; args: string[]; env: Record<string, string>;
@@ -89,9 +91,19 @@ export default function MarketDetail() {
   const d = detail.data;
   /** 平台内建条目（网关内建 HTTP 工具）：无配置可编辑，地址由用户填写 */
   const isNative = d?.executionMode === 'native';
+  /** CLI 条目（网关本机二进制）：安装配置由条目声明，实例化不可改（后端收到非空 config 会 400） */
+  const isCli = d?.executionMode === 'cli';
+  /**
+   * 该 CLI 条目的环境变量模板是否承接资产 url（`${OPSGATE_TARGET}` → CliRunner 渲染为 asset.url）。
+   * 没承接的条目（kubectl 走 KUBECONFIG、kafka-topics 走 argv）不提供目标地址输入框——
+   * 收了也没有落点，等于给用户一个不生效的字段。
+   */
+  const cliTakesTarget = isCli && Object.values(d?.cli?.env ?? {}).some((v) => v.includes('${OPSGATE_TARGET}'));
   const [nativeUrl, setNativeUrl] = useState('');
   const [nativeAllowPrivate, setNativeAllowPrivate] = useState(false);
   const [allowInsecureTls, setAllowInsecureTls] = useState(false);
+  /** CLI 目标地址（仅 cliTakesTarget 的条目渲染该输入框；落到 asset.url，由 CliRunner 渲染进 env） */
+  const [cliTarget, setCliTarget] = useState('');
 
   // 首次拿到条目时用目录默认配置初始化（条目切换才重置，用户编辑不丢）
   useEffect(() => {
@@ -114,10 +126,11 @@ export default function MarketDetail() {
   const envMap = useMemo(() => rowsToRec(cfg?.env ?? []), [cfg]);
   const headerMap = useMemo(() => rowsToRec(cfg?.headers ?? []), [cfg]);
   /** 槽位按当前配置实时识别（改了 env/args/headers → 槽位随之变化）。
-   *  原生条目没有可扫描的配置，槽位由目录条目声明（后端 detectSlots 已按 slotLabels 返回）。 */
+   *  原生 / CLI 条目没有可扫描的配置入口，槽位由目录条目声明（后端 detectSlots 已按 slotLabels 返回）；
+   *  CLI 的 env 模板里 `OPSGATE_TARGET` 是目标地址占位而非凭证槽位，不能靠前端扫描认出来。 */
   const slots = useMemo(
-    () => (isNative ? (d?.slots ?? []) : cfg ? detectSlots({ env: envMap, args: cfg.args, headers: headerMap }) : []),
-    [isNative, d?.slots, cfg, envMap, headerMap],
+    () => (isNative || isCli ? (d?.slots ?? []) : cfg ? detectSlots({ env: envMap, args: cfg.args, headers: headerMap }) : []),
+    [isNative, isCli, d?.slots, cfg, envMap, headerMap],
   );
 
   const switchMode = (m: 'form' | 'json') => {
@@ -166,12 +179,19 @@ export default function MarketDetail() {
         // 平台内建条目：地址由用户填写，不传可编辑配置
         ...(isNative
           ? { url: nativeUrl.trim(), ...(nativeAllowPrivate ? { allowPrivateNetwork: true } : {}), ...(allowInsecureTls ? { allowInsecureTls: true } : {}) }
-          : {
-              // 配置以用户编辑结果为准（未编辑时与目录默认值相同）
-              config: cfg
-                ? { command: cfg.command, args: cfg.args, env: envMap, headers: headerMap, url: cfg.url }
-                : undefined,
-            }),
+          : isCli
+            // CLI 条目：安装配置由条目声明（后端对非空 config 直接 400）；只传目标地址，
+            // 且仅当该条目的 env 模板真的承接 `${OPSGATE_TARGET}` 时才传——否则是空承诺。
+            ? {
+                ...(cliTakesTarget && cliTarget.trim() ? { url: cliTarget.trim() } : {}),
+                ...(cliTakesTarget && nativeAllowPrivate ? { allowPrivateNetwork: true } : {}),
+              }
+            : {
+                // 配置以用户编辑结果为准（未编辑时与目录默认值相同）
+                config: cfg
+                  ? { command: cfg.command, args: cfg.args, env: envMap, headers: headerMap, url: cfg.url }
+                  : undefined,
+              }),
       };
       return api<InstResult>('/api/v1/market/instantiate', {
         method: 'POST',
@@ -275,7 +295,7 @@ export default function MarketDetail() {
           </div>
           <div style={{ color: 'var(--muted)', fontSize: 'var(--text-sm)', lineHeight: 1.7 }}>{d.description}</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className="tag">{isNative ? '平台内建' : d.runtime}</span>
+            <span className="tag">{isNative ? '平台内建' : isCli ? '平台 CLI' : d.runtime}</span>
             {(d.addedCount ?? 0) > 0
               ? <span className="tag" style={{ color: 'var(--success)', background: 'var(--success-soft)' }}>已添加（{d.addedCount} 个资产）</span>
               : <span style={{ color: 'var(--meta)', fontSize: 'var(--text-xs)' }}>未添加</span>}
@@ -288,7 +308,9 @@ export default function MarketDetail() {
           <div style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)', lineHeight: 1.6, marginTop: 4 }}>
             {isNative
               ? '工具由网关进程内直接实现（不起子进程、无实例池）：添加资产后即可调用，不涉及实例预热'
-              : '使用前需先实例化（右侧"添加并绑定"）；首次调用时实例池现场拉起，预热可提前缓存'}
+              : isCli
+                ? '工具由网关本机二进制直执行（argv 不经 shell、无实例池）：添加资产后即可调用，不涉及实例预热'
+                : '使用前需先实例化（右侧"添加并绑定"）；首次调用时实例池现场拉起，预热可提前缓存'}
           </div>
           <ReadmePanel entryKey={d.key} />
         </div>
@@ -326,8 +348,36 @@ export default function MarketDetail() {
             </div>
           )}
 
-          {/* 配置：渐进披露（默认收起，主路径只露名称 + 槽位取值）。原生条目无安装配置，不渲染。 */}
-          <div style={{ display: isNative ? 'none' : 'grid', gap: 6 }}>
+          {isCli && (
+            <div style={{ display: 'grid', gap: 4 }}>
+              {cliTakesTarget ? (
+                <>
+                  <label style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)', fontWeight: 500 }}>目标地址</label>
+                  <input
+                    className="input mono"
+                    placeholder="如 db.example.invalid（原样传给 MYSQL_HOST）"
+                    value={cliTarget}
+                    onChange={(e) => setCliTarget(e.target.value)}
+                  />
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
+                    <input type="checkbox" checked={nativeAllowPrivate} onChange={(e) => setNativeAllowPrivate(e.target.checked)} />
+                    允许私网访问（内网地址必选；变更写治理审计）
+                  </label>
+                  <div style={{ color: 'var(--meta)', fontSize: 12 }}>
+                    该地址会渲染进环境变量 <code className="mono">{Object.entries(d?.cli?.env ?? {}).find(([, v]) => v.includes('${OPSGATE_TARGET}'))?.[0] ?? 'OPSGATE_TARGET'}</code>，由 CLI 在调用时读取；留空则不注入。
+                  </div>
+                </>
+              ) : (
+                <div style={{ color: 'var(--meta)', fontSize: 12, lineHeight: 1.6 }}>
+                  该条目没有承接目标地址的环境变量：目标由 {d?.cli?.bin ?? 'CLI'} 自己的配置决定（如 KUBECONFIG）或在调用时由 argv 显式给出，本页无需填写地址。
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 配置：渐进披露（默认收起，主路径只露名称 + 槽位取值）。
+              原生条目无安装配置、CLI 条目的配置由条目声明（后端拒收 config），两者都不渲染编辑区。 */}
+          <div style={{ display: isNative || isCli ? 'none' : 'grid', gap: 6 }}>
             <button
               type="button"
               className="btn"
@@ -401,8 +451,8 @@ export default function MarketDetail() {
             )}
           </div>
 
-          {/* 原生条目：槽位没有可内联的配置行，单独列出（每个槽位填值或选凭证） */}
-          {isNative && slots.length > 0 && (
+          {/* 原生 / CLI 条目：槽位没有可内联的配置行，单独列出（每个槽位填值或选凭证） */}
+          {(isNative || isCli) && slots.length > 0 && (
             <div style={{ display: 'grid', gap: 8 }}>
               <span style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)', fontWeight: 500 }}>凭证</span>
               {slots.map((s) => (
@@ -430,7 +480,11 @@ export default function MarketDetail() {
             {slots.length === 0 ? (
               isNative
                 ? <>该条目没有凭证槽位；若产品需要鉴权，由目录维护者补充槽位声明。</>
-                : <>当前配置未识别到凭证槽位。在 env / args / headers 的值里写 <code className="mono">{'${VAR}'}</code> 占位符即可自动识别。</>
+                : isCli
+                  ? <>该条目不注入凭证槽位；需要鉴权的参数由调用方在 argv 中给出。</>
+                  : <>当前配置未识别到凭证槽位。在 env / args / headers 的值里写 <code className="mono">{'${VAR}'}</code> 占位符即可自动识别。</>
+            ) : isCli ? (
+              <>该条目声明了 {slots.length} 个凭证槽位，直接填写值或点 <code className="mono">+</code> 选择已有凭证；两者都不填则该槽位不注入，调用时由 CLI 自己报错。</>
             ) : (
               <>已识别 {slots.length} 个凭证槽位，直接在上方填写值或点 <code className="mono">+</code> 选择已有凭证；两者都不填则该槽位不注入，产品需要它会自己报错。</>
             )}
@@ -467,7 +521,20 @@ export default function MarketDetail() {
                   null,
                   2,
                 )
-              : toJson(cfg ?? { command: '', args: [], env: [], headers: [], url: null })}
+              : isCli
+                ? JSON.stringify(
+                    {
+                      executionMode: 'cli',
+                      category: d?.categories?.[0] ?? '',
+                      command: d?.cli?.bin ?? '',
+                      env: d?.cli?.env ?? {},
+                      ...(cliTakesTarget ? { url: cliTarget.trim() || '<待填目标地址>' } : {}),
+                      credentialSlots: slots.map((s) => s.name),
+                    },
+                    null,
+                    2,
+                  )
+                : toJson(cfg ?? { command: '', args: [], env: [], headers: [], url: null })}
           </pre>
         )}
       </div>

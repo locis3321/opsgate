@@ -70,6 +70,8 @@ export interface AppDeps {
   nativeRegistry?: import('./framework/types.js').NativeToolDefinition[];
   /** 测试注入：自定义 Market 目录条目（默认加载 src/data/market-catalog.json） */
   marketEntries?: import('./services/marketCatalog.js').CatalogEntry[];
+  /** CLI 一次性进程执行器（生产装配在 server.ts，Task 9）；缺省时 CLI 资产拒绝调用 */
+  cliRunner?: import('./services/cliRunner.js').CliRunner;
 }
 
 /** 未装配 McpEndpoint 的测试/骨架应用：/mcp 保持 501 占位（default-deny 语义不变） */
@@ -109,7 +111,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     ...makeUserRoutes(db, auth, deps.audit),
     ...makeSshRoutes({ db, credentials: deps.credentials! }),
     ...makeTransferRoutes({ db, transfer: deps.transfer!, ssh: deps.ssh!, credentials: deps.credentials!, audit: deps.audit! }),
-    ...makeRuntimeRoutes({ pool: deps.instancePool, ssh: deps.ssh, redis: deps.redis, kafka: deps.kafka, transfer: deps.transfer, db, audit: deps.audit }),
+    ...makeRuntimeRoutes({ pool: deps.instancePool, ssh: deps.ssh, redis: deps.redis, kafka: deps.kafka, transfer: deps.transfer, db, audit: deps.audit, cliRunner: deps.cliRunner }),
     ...(deps.mcp ? makeMcpRoutes(deps.mcp) : mcpStubRoutes),
     ...(deps.frontendDist ? makeStaticRoutes(deps.frontendDist) : []),
     ...(deps.audit && deps.settings

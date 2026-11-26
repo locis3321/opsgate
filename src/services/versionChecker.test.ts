@@ -50,11 +50,12 @@ describe('T6：锁定版本提取', () => {
     expect(extractPinnedVersion(null, 'npm')).toBeNull();
   });
 
-  it('现有 13 条目录条目全部能解析出锁定版本（AC-62 一致性）', async () => {
+  it('现有目录条目全部能解析出锁定版本（AC-62 一致性）', async () => {
     const { loadCatalog } = await import('./marketCatalog.js');
     for (const e of loadCatalog()) {
-      // 原生条目（网关内建 HTTP 工具）与 HTTP/SSE 型条目都没有本地包版本，不参与版本检测
-      if (e.executionMode === 'native' || e.installations[e.runtime]?.url) continue;
+      // 原生条目（网关内建 HTTP 工具）、CLI 条目（二进制由主机预装，无本地包）与 HTTP/SSE 型条目
+      // 都没有本地包版本，不参与版本检测
+      if (e.executionMode === 'native' || e.executionMode === 'cli' || e.installations[e.runtime]?.url) continue;
       expect(extractPinnedVersion(e.installations, e.runtime), e.key).toMatch(/^\d+\.\d+\.\d+$/);
     }
   });

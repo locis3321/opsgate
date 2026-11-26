@@ -16,8 +16,24 @@ type Insert = typeof schema.marketEntries.$inferInsert;
 export type MarketStatus = 'draft' | 'verified' | 'disabled';
 export const MARKET_STATUSES: readonly MarketStatus[] = ['draft', 'verified', 'disabled'];
 
+/**
+ * CLI 条目的持久化形态（ADR-037）：`bin` / `env` 与 mcp 条目同列，存进 `installations[runtime]`
+ * 的 `command` / `env`（设计说明 §3.1：只扩 execution_mode 取值，不新增列）。
+ * 读回时由 `rowToEntry` 还原成 `cli` 段，保证"JSON 种子 / DB 读取"两条来源对实例化同形。
+ */
+function installationsWithCli(entry: CatalogEntry): CatalogEntry['installations'] {
+  const cli = entry.cli;
+  if (entry.executionMode !== 'cli' || !cli) return entry.installations;
+  return {
+    ...entry.installations,
+    [entry.runtime]: { ...(entry.installations[entry.runtime] ?? {}), command: cli.bin, env: { ...(cli.env ?? {}) } },
+  };
+}
+
 /** 行 → CatalogEntry（JSON 列已由 drizzle 的 mode:'json' 反序列化） */
 export function rowToEntry(row: Row): CatalogEntry {
+  const installs = row.installations as CatalogEntry['installations'];
+  const cliBin = row.executionMode === 'cli' ? installs[row.runtime]?.command : undefined;
   return {
     key: row.key,
     name: row.name,
@@ -28,9 +44,14 @@ export function rowToEntry(row: Row): CatalogEntry {
     tags: row.tags,
     runtime: row.runtime as CatalogEntry['runtime'],
     ...(row.executionMode === 'native' ? { executionMode: 'native' as const } : {}),
+    ...(row.executionMode === 'cli' ? { executionMode: 'cli' as const } : {}),
+    // CLI 段从 installations 还原：bin 缺失说明该行不是合法 CLI 条目，不伪造 bin（实例化侧显式 400）
+    ...(cliBin
+      ? { cli: { bin: cliBin, ...(installs[row.runtime]?.env ? { env: installs[row.runtime]!.env } : {}) } }
+      : {}),
     ...(row.slotLabels ? { slotLabels: row.slotLabels } : {}),
     ...(row.defaultGroup ? { defaultGroup: row.defaultGroup } : {}),
-    installations: row.installations as CatalogEntry['installations'],
+    installations: installs,
   };
 }
 
@@ -62,11 +83,12 @@ export function entryToRow(
     runtime: entry.runtime,
     slotLabels: entry.slotLabels ?? null,
     defaultGroup: entry.defaultGroup ?? null,
-    installations: entry.installations,
+    installations: installationsWithCli(entry),
     status,
     executionMode: entry.executionMode ?? 'mcp',
-    // 锁定版本从 args 解析，供版本比对（T6）；解析不到留空
-    versionPinned: extractPinnedVersion(entry.installations, entry.runtime),
+    // 锁定版本从 args 解析，供版本比对（T6）；解析不到留空。
+    // CLI 条目不参与版本检测（二进制由主机预装，没有可固定的包版本）
+    versionPinned: entry.executionMode === 'cli' ? null : extractPinnedVersion(entry.installations, entry.runtime),
   };
 }
 
@@ -141,6 +163,11 @@ export function updateEntry(
     slotLabels?: Record<string, string> | null;
     defaultGroup?: string | null;
     installations?: CatalogEntry['installations'];
+    /**
+     * 管理端只支持 mcp 与 native 互转：`cli` 条目的声明段（`cli.bin` / `cli.env`）没有对应的
+     * 管理端表单与校验，若允许 PATCH 写入 'cli' 会得到"execution_mode=cli 但没有二进制"的行
+     * （实例化时才 400）。cli 模板目前只由内置目录（种子）/ JSON 提供。
+     */
     executionMode?: 'mcp' | 'native';
     status?: MarketStatus;
     readmeUrl?: string | null;

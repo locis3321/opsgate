@@ -9,12 +9,12 @@ import { describe, expect, it } from 'vitest';
 import { BUILTIN_GUARD_RULES } from './db/builtinGuardRules.js';
 
 describe('内置安全策略定义', () => {
-  it('覆盖 3 条 block + 5 条 mark（§4.7 / §5.5.7）', () => {
+  it('覆盖 4 条 block + 9 条 mark（§4.7 / §5.5.7 + ADR-037 CLI 危险命令）', () => {
     const blocks = BUILTIN_GUARD_RULES.filter((r) => r.kind === 'block');
     const marks = BUILTIN_GUARD_RULES.filter((r) => r.kind === 'mark');
     expect(blocks).toHaveLength(4); // §4.7 三条 + 敏感路径上传
-    expect(marks).toHaveLength(4); // §4.7 三条 mark 中两条 + 落脚本
-    expect(BUILTIN_GUARD_RULES).toHaveLength(8);
+    expect(marks).toHaveLength(9); // §4.7 三条 mark 中两条 + 落脚本 + 5 条 CLI 危险命令
+    expect(BUILTIN_GUARD_RULES).toHaveLength(13);
   });
 
   it('id 唯一、priority 唯一且为正、正则可编译', () => {

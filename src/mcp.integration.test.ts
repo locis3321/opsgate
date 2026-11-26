@@ -578,3 +578,44 @@ describe('R1–R8 与社区工具兼容（描述规范化）', { timeout: 60_000
     expect(descViolations).toEqual([]);
   });
 });
+
+describe('A1 元工具实时解析（不依赖会话快照）', { timeout: 60_000 }, () => {
+  /**
+   * 真实缺陷（会话 6e3fb6fa）：会话建立后新建的资产不在 session.aggregate 快照里，
+   * list_assets 搜不到、list_asset_tools/invoke 返回 -32006（而 view_asset 查 DB 能读到，两者矛盾），
+   * agent 误判为"无权"反复重试。修复：元工具实时查 DB（resolveVisibleAsset），复用 isVisible 不泄露。
+   */
+  it('会话建立后新建的资产：旧会话 list_assets 能搜到（按 name/displayName），list_asset_tools 能解析', async () => {
+    // 1. 先建立会话（此时库里没有新资产）
+    const { sessionId } = await initialize(ctx.adminKey, '?group=all');
+
+    // 2. 会话建立后，直接插一个新 cli 资产（模拟"刚建的 kubectl-cli 资产"）
+    await ctx.db.insert(schema.servers).values({
+      id: 'a1-newassets', name: 'a1-fresh-cli', displayName: 'A1 新建的CLI资产',
+      type: 'native', executionMode: 'cli', category: 'other',
+      command: 'echo', args: [], env: {}, credentialSlots: [],
+      ownerId: 'u-admin', visibility: 'owner', configHash: 'c-a1',
+    }).run();
+
+    // 3. 旧会话里 list_assets 按 name 搜 → 必须能搜到（修复前是 []）
+    const byName = await postMcp(ctx.adminKey, rpc('tools/call', { name: 'opsgate_list_assets', arguments: { search: 'a1-fresh-cli' } }), sessionId);
+    const listName = JSON.parse((JSON.parse(byName.body) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text);
+    expect(listName.map((a: { name: string }) => a.name)).toContain('a1-fresh-cli');
+    // 返回含 displayName，便于人对上号
+    expect(listName.find((a: { name: string }) => a.name === 'a1-fresh-cli').displayName).toBe('A1 新建的CLI资产');
+
+    // 4. 按 name 直接 list_asset_tools → 必须解析出 other_run（修复前 -32006）
+    const toolsRes = await postMcp(ctx.adminKey, rpc('tools/call', { name: 'opsgate_list_asset_tools', arguments: { asset: 'a1-fresh-cli' } }), sessionId);
+    expect((JSON.parse(toolsRes.body) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text).toContain('other_run');
+
+    // 5. 按 displayName 也能解析（同一 helper）
+    const byDisplay = await postMcp(ctx.adminKey, rpc('tools/call', { name: 'opsgate_list_asset_tools', arguments: { asset: 'A1 新建的CLI资产' } }), sessionId);
+    expect((JSON.parse(byDisplay.body) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text).toContain('other_run');
+  });
+
+  it('不存在的资产仍返回 -32006（实时解析不放宽为"任何 ref 都放行"）', async () => {
+    const { sessionId } = await initialize(ctx.adminKey, '?group=all');
+    const r = await postMcp(ctx.adminKey, rpc('tools/call', { name: 'opsgate_list_asset_tools', arguments: { asset: 'definitely-ghost-asset' } }), sessionId);
+    expect((JSON.parse(r.body) as { result: { content: Array<{ text: string }> } }).result.content[0]!.text).toContain('-32006');
+  });
+});

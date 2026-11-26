@@ -19,8 +19,10 @@ RUN pnpm run build && cd frontend && pnpm run build
 FROM docker.1ms.run/library/node:22-bookworm-slim AS runtime
 
 # procps: tree-kill 依赖 ps；tini: PID1 回收 stdio 子进程；curl: 安装 uv
+# bubblewrap: CLI 资产执行沙箱（server.ts 装配时 sandboxEnabled 恒为 true，缺 bwrap 会 fail-closed 拒绝）
+# 仅装 bwrap 本身；kubectl/mysql 等 CLI 二进制按一期约定由宿主预装（容器部署需自建镜像或挂载）
 RUN apt-get update \
- && apt-get install -y --no-install-recommends procps ca-certificates curl tini \
+ && apt-get install -y --no-install-recommends procps ca-certificates curl tini bubblewrap \
  && rm -rf /var/lib/apt/lists/*
 # uvx：Market 目录中 pypi 条目运行时需要（uv 官方静态安装）
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \

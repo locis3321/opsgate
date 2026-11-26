@@ -32,6 +32,21 @@ function EnumTag({ value, labels }: { value: string; labels: Record<string, stri
   );
 }
 
+/**
+ * 执行模式徽章。cli 单独走琥珀色：它不是"代理某个 MCP 实现"，也不是"进程内直连"，
+ * 而是网关本机一次性子进程（ADR-037）。与 mcp/native 同色会让三种执行方式在列表里无法一眼区分。
+ */
+function ExecBadge({ value }: { value: string }) {
+  if (value === 'cli') {
+    return (
+      <span className="badge-warn" title="cli：网关本机一次性子进程（argv 直执行，凭证只经 env/文件注入）">
+        CLI 子进程<span className="mono" style={{ marginLeft: 5, opacity: 0.65 }}>cli</span>
+      </span>
+    );
+  }
+  return <EnumTag value={value} labels={EXEC_LABEL} />;
+}
+
 /** 可见范围：图标+文字双通道；public 走琥珀警示（Spec §8.6 V1/V2） */
 function VisibilityBadge({ value }: { value: string }) {
   if (value === 'public') return <StatusBadge kind="warn" label="公开" title="所有成员可见并可调用" />;
@@ -41,7 +56,7 @@ function VisibilityBadge({ value }: { value: string }) {
 
 interface Asset {
   id: string; name: string; displayName: string | null; type: string; category: string;
-  executionMode: 'native' | 'mcp'; visibility: string; enabled: boolean; tags: string[];
+  executionMode: 'native' | 'mcp' | 'cli'; visibility: string; enabled: boolean; tags: string[];
 }
 
 /** 批量信任指纹的结果分类（服务端口径：skipped = 非目标类型，failed = 真失败） */
@@ -241,7 +256,7 @@ export default function Assets() {
           value={exec}
           onChange={(v) => { setExec(v); setPage(1); }}
           placeholder="执行模式全部"
-          options={[EXEC_ALL, { value: 'native', label: 'native' }, { value: 'mcp', label: 'mcp' }]}
+          options={[EXEC_ALL, { value: 'native', label: 'native' }, { value: 'mcp', label: 'mcp' }, { value: 'cli', label: 'cli' }]}
         /></div>
         <div style={{ minWidth: 130 }}><Combobox
           ariaLabel="状态筛选"
@@ -348,7 +363,7 @@ export default function Assets() {
                   </td>
                   <td><EnumTag value={a.type} labels={TYPE_LABEL} /></td>
                   <td style={{ fontSize: 'var(--text-sm)' }}>{CATEGORY_LABEL[a.category] ?? a.category}</td>
-                  <td><EnumTag value={a.executionMode} labels={EXEC_LABEL} /></td>
+                  <td><ExecBadge value={a.executionMode} /></td>
                   <td><VisibilityBadge value={a.visibility} /></td>
                   <td>{(a.tags ?? []).map((t) => <span key={t} className="tag" style={{ marginRight: 4 }}>{t}</span>)}</td>
                   <td><CredState agg={slotStatus.data?.[a.id]} /></td>

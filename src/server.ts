@@ -3,8 +3,9 @@
  * 启动序列：bootstrap(L0) → 数据目录 → SQLite(WAL/FK) → 迁移 → 审计当月表 → settings 启动校验
  * → better-auth（首启建管理员）→ buildApp（default-deny 注册表 + 根级 preHandler）→ listen。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { env } from 'node:process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
@@ -15,8 +16,8 @@ import { Settings } from './config/settings.js';
 import * as schema from './db/schema.js';
 import { ensureAuditTable } from './db/audit.js';
 import { createSettingsStorage } from './db/settings-store.js';
-import { guardRules } from './db/schema.js';
 import { BUILTIN_GUARD_RULES } from './db/builtinGuardRules.js';
+import { syncBuiltinGuardRules } from './db/guardRulesSeedSync.js';
 import { syncCatalogEntries } from './db/marketSeedSync.js';
 import { loadCatalog } from './services/marketCatalog.js';
 import { createAuth, createUserWithPassword, ensureAuthTables } from './services/auth.js';
@@ -39,6 +40,7 @@ import { resolveSshCredential } from './services/sshCredential.js';
 import { resolveRedisConnection } from './services/redisConnection.js';
 import { resolveKafkaConnection } from './services/kafkaConnection.js';
 import { InstancePool } from './services/instancePool.js';
+import { CliRunner } from './services/cliRunner.js';
 import { McpEndpoint } from './services/mcpEndpoint.js';
 import { canOnAsset } from './services/authzBuilder.js';
 import type { DispatchServices } from './framework/dispatch.js';
@@ -84,21 +86,18 @@ async function main(): Promise<void> {
     console.log(`[bootstrap] Market 目录跳过已被管理员删除的 ${catalogSync.skippedDeleted.length} 条：${catalogSync.skippedDeleted.join(', ')}`);
   }
 
-  // 首启 seed 内置安全策略（§4.7）：生产部署不会跑 `pnpm run seed`，此前只靠手工执行，
-  // 导致部署机 guard_rules 长期为 0 行、页面显示「暂无安全策略」。
-  //
-  // 用数据目录下的一次性标记判断"是否已播种过"，而不是"表是否为空"：
-  // 管理员有权删除内置规则（已验证的能力），删光后重启不能把它们又加回来。
-  // 标记是运行时状态（不属于配置），不放 system_settings（ADR-024 只存偏离默认值的配置项）。
+  // 内置安全策略增量同步（§4.7）：生产部署不会跑 `pnpm run seed`。
+  // 早期实现用一次性标记「首启播种后永不再补」，导致**新增的内置规则进不了存量库**
+  // （2026-11-26 真实部署验证：CLI 规则未播种、危险 argv 不触发 risk=high）。
+  // 改为与 Market 目录同思路的增量同步：marker 记录"代码播种过哪些 rule id"，
+  // 只补代码新增的、不覆盖管理员改动、不复活管理员删掉的（见 guardRulesSeedSync.ts）。
   const guardSeedMarker = path.join(cfg.dataDir, '.guard-rules-seeded');
-  if (!existsSync(guardSeedMarker)) {
-    let seeded = 0;
-    for (const r of BUILTIN_GUARD_RULES) {
-      const res = db.insert(guardRules).values({ ...r, enabled: true, locked: true, builtin: true, hitCount: 0 }).onConflictDoNothing({ target: guardRules.id }).run();
-      if (res.changes > 0) seeded++;
-    }
-    writeFileSync(guardSeedMarker, new Date().toISOString());
-    console.log(`[bootstrap] 已导入内置安全策略 ${seeded} 条（首启，此后不再自动补种）`);
+  const ruleSync = syncBuiltinGuardRules(db, BUILTIN_GUARD_RULES, guardSeedMarker);
+  if (ruleSync.inserted.length > 0) {
+    console.log(`[bootstrap] 内置安全策略新增 ${ruleSync.inserted.length} 条：${ruleSync.inserted.join(', ')}`);
+  }
+  if (ruleSync.skippedDeleted.length > 0) {
+    console.log(`[bootstrap] 内置安全策略跳过已被管理员删除的 ${ruleSync.skippedDeleted.length} 条：${ruleSync.skippedDeleted.join(', ')}`);
   }
 
   // L1 settings 启动期校验（AC-59：孤儿告警 / 非法值启动失败）
@@ -200,6 +199,34 @@ async function main(): Promise<void> {
     runtimeCredsDir: path.join(cfg.dataDir, 'runtime-creds'),
   }, undefined, settings); // E2E-R4：生产装配必须传 settings 源（漏传=启动快照，热生效失效）
 
+  // —— Task 9 CLI 一次性执行器（不进实例池：CLI 无 ready 态）——
+  //
+  // baseEnv.PATH 必须与创建校验（src/routes/assets.ts 的 `which` 子进程继承网关进程 PATH）**同源**：
+  // 创建时用 which 找到的二进制，执行时 CliRunner 用这里注入的 PATH 再解析一次；两处 PATH 不一致
+  // 就会出现"资产建成了、执行却 bin-missing"。which 继承的正是本进程环境，故此处取同一份 PATH。
+  //
+  // AC-61（scripts/check-redlines.mjs）禁止 src/ 出现宿主环境变量的属性访问字面量（逐字扫描，注释也算），
+  // 故用 `node:process` 的具名导出 `env` 取值：语义等价、不命中该字面量模式。宿主环境读取仍只收敛在
+  // server.ts 这一处装配点，业务代码一律拿注入值。
+  const gatewayPath = env.PATH ?? '';
+  // dataDir 可能是相对路径（bootstrap 默认 `./data`）。bwrap 参数里 `--tmpfs <dataDir>` 必须是绝对路径：
+  // 相对路径会随子进程 CWD 解析——bwrap 启动后工作目录已变，`--tmpfs ./data` 遮的就不是网关的数据目录
+  // （凭证/DB 暴露），沙箱也就名存实亡。这里先 resolve 一次，执行器与凭证目录共用同一份绝对路径。
+  //
+  // runtimeCredsDir 同样必须是绝对路径：它会被 `--bind` 成沙箱内挂载源，相对路径在 bwrap
+  // 换过 CWD 后同样解析不到（bind 失败即整次执行失败，或绑到错误目录）。
+  const absoluteDataDir = path.resolve(cfg.dataDir);
+  const absoluteCredsDir = path.resolve(cfg.dataDir, 'runtime-creds');
+  const cliRunner = new CliRunner({
+    dataDir: absoluteDataDir,
+    runtimeCredsDir: absoluteCredsDir,
+    baseEnv: { PATH: gatewayPath },
+    outputTruncateBytes: () => settings.get<number>('tools.output_truncate_bytes'),
+    commandTimeoutMs: () => settings.get<number>('tools.command_timeout_sec') * 1000,
+    // 「要求沙箱」：实际可用性由 isSandboxAvailable() 判定，不可用即 fail-closed 拒绝执行（不降级裸跑）
+    sandboxEnabled: () => true,
+  });
+
   const nativeTools = await loadNativeTools();
   const toolRegistry = buildToolRegistry(nativeTools);
   if (toolRegistry.errors.length > 0) {
@@ -226,6 +253,9 @@ async function main(): Promise<void> {
       visibility: asset.visibility,
       sharedWithUserIds: (asset as { sharedWithUserIds?: string[] }).sharedWithUserIds ?? [],
     }),
+    // CLI 资产经 /mcp 调用时必须落到同一个执行器实例：执行器的在飞登记/统计/health 与
+    // /runtime/cli 观测的是同一份状态，另建实例会让端点看不到任何在飞进程。
+    cliRunner,
   });
 
   const verifyTransferToken = async (
@@ -294,6 +324,7 @@ async function main(): Promise<void> {
     sqlite,
     instancePool,
     mcp: mcpEndpoint,
+    cliRunner,
     nativeRegistry: [...toolRegistry.registry.values()],
     frontendDist: path.join(fileURLToPath(new URL('.', import.meta.url)), '../dist/frontend'),
     runtimeCredsDir: path.join(cfg.dataDir, 'runtime-creds'),

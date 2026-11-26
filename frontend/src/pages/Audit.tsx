@@ -12,6 +12,7 @@ const AUTH_ACTIONS = [
   'group_change', 'update_group', 'delete_group', 'set_metadata', 'delete_metadata', 'remove_member',
   'guard_rule_change', 'native_tool_toggle', 'system_setting',
   'asset_create', 'asset_prewarm', 'asset_tool_filters', 'asset_enabled_change', 'remove_asset',
+  'cli_create_denied',
 ];
 
 /** 动作/状态/风险中文展示映射 */
@@ -25,6 +26,7 @@ const ACTION_LABELS: Record<string, string> = {
   native_tool_toggle: '原生工具开关',
   asset_create: '资产创建', asset_prewarm: '资产预热', asset_tool_filters: '资产工具过滤',
   asset_enabled_change: '资产启停', remove_asset: '资产删除',
+  cli_create_denied: 'CLI 创建被拒',
   transfer_upload: '传输上传', transfer_landed: '传输落位', audit_archive: '审计归档',
 };
 const ACTION_OPTIONS = Object.entries(ACTION_LABELS).map(([v, label]) => ({ v, label }));

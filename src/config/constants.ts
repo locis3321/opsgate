@@ -184,4 +184,7 @@ export const GOVERNANCE_ACTIONS = [
   'asset_tool_filters',
   'asset_enabled_change',
   'remove_asset',
+  // 创建期角色闸门被拒（ADR-037 3.13）：成员试图建白名单外的 CLI 资产。
+  // 属管理后台行为而非资产操作（拒绝发生在资产存在之前，没有 server_id 可归属）。
+  'cli_create_denied',
 ] as const;
