@@ -31,7 +31,10 @@ jobs:
 
       - name: Install frontend deps
         working-directory: frontend
-        run: pnpm install --frozen-lockfile
+        # 根有 pnpm-workspace.yaml（仅放 minimumReleaseAgeExclude），pnpm 会把根当 workspace 根、
+        # 向上复用根 lockfile 并跳过 frontend 自己的 lockfile → frontend node_modules 装不上。
+        # --ignore-workspace 让 frontend 按自身 lockfile 独立安装。
+        run: pnpm install --frozen-lockfile --ignore-workspace
 
       # —— 质量门禁（与 ci.yml 同口径；发布前必须全绿）——
       - name: Lint / Typecheck / Redlines / Test

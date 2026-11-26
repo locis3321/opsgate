@@ -22,7 +22,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Install frontend deps
         working-directory: frontend
-        run: pnpm install --frozen-lockfile
+        # 根有 pnpm-workspace.yaml，pnpm 会把根当 workspace 根、跳过 frontend 自己的 lockfile。
+        run: pnpm install --frozen-lockfile --ignore-workspace
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm run check:redlines
